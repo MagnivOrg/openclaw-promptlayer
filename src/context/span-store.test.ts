@@ -31,10 +31,14 @@ describe('SpanStore', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedToolCalls: [],
+      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     const session = spanStore.get('test-session');
@@ -56,6 +60,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     spanStore.pushTool('test-session', {
@@ -95,6 +101,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     spanStore.pushTool('test-session', {
@@ -119,6 +127,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     spanStore.delete('test-session');
@@ -135,6 +145,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     const entry = {
@@ -144,6 +156,8 @@ describe('SpanStore', () => {
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now(),
+      inputMessages: [],
+      systemInstructions: [],
     };
 
     spanStore.setLlmSpan('test-session', 'run-1', entry);
@@ -161,6 +175,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     const entry = {
@@ -170,6 +186,8 @@ describe('SpanStore', () => {
       provider: 'openai',
       model: 'gpt-4o',
       startTime: Date.now(),
+      inputMessages: [],
+      systemInstructions: [],
     };
 
     spanStore.setLlmSpan('test-session', 'run-1', entry);
@@ -188,6 +206,8 @@ describe('SpanStore', () => {
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
     });
 
     expect(spanStore.deleteLlmSpan('test-session', 'nope')).toBeUndefined();

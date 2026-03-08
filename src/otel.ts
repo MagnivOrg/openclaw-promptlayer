@@ -30,7 +30,7 @@ export function initializeOtel(config: LogfirePluginConfig): NodeSDK {
   const token = config.token;
   if (!token) {
     throw new Error(
-      '@ultrathink-solutions/openclaw-logfire: LOGFIRE_TOKEN is required. ' +
+      '@shichen335/openclaw-logfire: LOGFIRE_TOKEN is required. ' +
         'Set it as an environment variable or in plugins.entries.logfire.config.token',
     );
   }

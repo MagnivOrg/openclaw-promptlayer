@@ -1,12 +1,12 @@
 {
-  "name": "@ultrathink-solutions/openclaw-logfire",
-  "version": "0.3.0",
+  "name": "@shichen335/openclaw-logfire",
+  "version": "1.0.0",
   "description": "Pydantic Logfire observability plugin for OpenClaw — OTEL GenAI semantic conventions, distributed tracing, token metrics, trace links",
   "license": "MIT",
-  "author": "Ultrathink Solutions <engineering@ultrathink.dev>",
+  "author": "shichen335",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Ultrathink-Solutions/openclaw-logfire"
+    "url": "git+https://github.com/chenbaiyujason/openclaw-logfire.git"
   },
   "keywords": [
     "openclaw",
@@ -37,9 +37,12 @@
     "LICENSE",
     "CHANGELOG.md"
   ],
-  "homepage": "https://github.com/Ultrathink-Solutions/openclaw-logfire#readme",
+  "homepage": "https://github.com/chenbaiyujason/openclaw-logfire#readme",
   "bugs": {
-    "url": "https://github.com/Ultrathink-Solutions/openclaw-logfire/issues"
+    "url": "https://github.com/chenbaiyujason/openclaw-logfire/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "openclaw": {
     "extensions": [
@@ -47,6 +50,8 @@
     ]
   },
   "scripts": {
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",

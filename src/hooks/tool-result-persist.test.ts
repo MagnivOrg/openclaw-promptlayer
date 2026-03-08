@@ -13,10 +13,15 @@ function seedSessionWithTool(sessionKey: string, toolName: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 1,
     hasError: false,
     startTime: Date.now(),
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: [],
   });
 
   spanStore.pushTool(sessionKey, {
@@ -87,6 +92,14 @@ describe('handleToolResultPersist', () => {
       'gen_ai.tool.call.result',
       expect.any(String),
     );
+    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
+      'tool_response',
+      expect.any(String),
+    );
+    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
+      'logfire.json_schema',
+      expect.stringContaining('"tool_response"'),
+    );
   });
 
   it('does not capture tool output by default', () => {
@@ -124,10 +137,15 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedToolCalls: [],
+      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 2,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
+      initialHistoryMessages: [],
     });
 
     spanStore.pushTool('sess-1', {
@@ -160,10 +178,15 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedToolCalls: [],
+      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
+      initialHistoryMessages: [],
     });
 
     // Should not throw
@@ -183,5 +206,46 @@ describe('handleToolResultPersist', () => {
     // Should throw but span.end should still be called (in finally block)
     expect(() => handleToolResultPersist(baseEvent, baseCtx, createTestConfig())).toThrow();
     expect(toolSpan.end).toHaveBeenCalled();
+  });
+
+  it('captures tool output when message content capture is enabled', () => {
+    const toolSpan = seedSessionWithTool('sess-1', 'Read');
+
+    handleToolResultPersist(
+      baseEvent,
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
+      'gen_ai.tool.call.result',
+      expect.any(String),
+    );
+  });
+
+  it('finalizes the running tools group when the last tool completes', () => {
+    const toolSpan = seedSessionWithTool('sess-1', 'Read');
+    const runningToolsSpan = mockSpan();
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    session.activeToolGroups.set('run-1', {
+      span: runningToolsSpan,
+      ctx: mockContext(),
+      runId: 'run-1',
+      toolNames: ['Read'],
+      openToolCount: 1,
+      startTime: Date.now() - 150,
+    });
+
+    const activeTool = spanStore.peekTool('sess-1');
+    if (!activeTool) throw new Error('expected active tool');
+    activeTool.runId = 'run-1';
+
+    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
+
+    expect(toolSpan.end).toHaveBeenCalled();
+    expect(runningToolsSpan.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+    expect(runningToolsSpan.end).toHaveBeenCalled();
+    expect(spanStore.getToolGroup('sess-1', 'run-1')).toBeUndefined();
   });
 });

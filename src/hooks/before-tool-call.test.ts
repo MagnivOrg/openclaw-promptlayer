@@ -5,8 +5,20 @@ import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
 import { handleBeforeToolCall } from './before-tool-call.js';
 import type { BeforeToolCallEvent, ToolContext } from './before-tool-call.js';
 
-const { mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
-  const span = {
+const { mockRunningToolsSpan, mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
+  const runningToolsSpan = {
+    end: vi.fn(),
+    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'aaa', traceFlags: 1 })),
+    setAttribute: vi.fn().mockReturnThis(),
+    setStatus: vi.fn().mockReturnThis(),
+    addEvent: vi.fn().mockReturnThis(),
+    addLink: vi.fn().mockReturnThis(),
+    recordException: vi.fn().mockReturnThis(),
+    isRecording: vi.fn(() => true),
+    updateName: vi.fn().mockReturnThis(),
+    setAttributes: vi.fn().mockReturnThis(),
+  };
+  const toolSpan = {
     end: vi.fn(),
     spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
     setAttribute: vi.fn().mockReturnThis(),
@@ -19,8 +31,13 @@ const { mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
     setAttributes: vi.fn().mockReturnThis(),
   };
   return {
-    mockToolSpan: span,
-    mockTracerInstance: { startSpan: vi.fn(() => span) },
+    mockRunningToolsSpan: runningToolsSpan,
+    mockToolSpan: toolSpan,
+    mockTracerInstance: {
+      startSpan: vi.fn((name: string) =>
+        name.startsWith('running ') ? runningToolsSpan : toolSpan
+      ),
+    },
     mockSetSpan: vi.fn(() => ({})),
   };
 });
@@ -49,20 +66,27 @@ function seedSession(sessionKey: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
     startTime: Date.now(),
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: [],
   });
 }
 
 describe('handleBeforeToolCall', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     spanStore.delete('sess-1');
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     spanStore.delete('sess-1');
   });
 
@@ -82,7 +106,8 @@ describe('handleBeforeToolCall', () => {
 
     handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
+    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1);
+    expect(lastCall).toEqual([
       'execute_tool Read',
       expect.objectContaining({
         kind: SpanKind.INTERNAL,
@@ -93,7 +118,28 @@ describe('handleBeforeToolCall', () => {
         }),
       }),
       expect.anything(),
+    ]);
+  });
+
+  it('uses OpenClaw toolCallId when provided', () => {
+    seedSession('sess-1');
+
+    handleBeforeToolCall(
+      { ...baseEvent, toolCallId: 'write_123' },
+      { ...baseCtx, toolCallId: 'write_123' },
+      createTestConfig(),
     );
+
+    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1);
+    expect(lastCall).toEqual([
+      expect.anything(),
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          'gen_ai.tool.call.id': 'write_123',
+        }),
+      }),
+      expect.anything(),
+    ]);
   });
 
   it('pushes the tool span onto the session stack', () => {
@@ -139,16 +185,18 @@ describe('handleBeforeToolCall', () => {
 
     handleBeforeToolCall(baseEvent, baseCtx, config);
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
+    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1);
+    expect(lastCall).toEqual([
       expect.anything(),
       expect.objectContaining({
         attributes: expect.objectContaining({
           'gen_ai.tool.call.arguments': expect.any(String),
-          'openclaw.tool.input_size': expect.any(Number),
+          tool_arguments: expect.any(String),
+          'logfire.json_schema': expect.stringContaining('"tool_arguments"'),
         }),
       }),
       expect.anything(),
-    );
+    ]);
   });
 
   it('does not capture tool input by default', () => {
@@ -156,7 +204,11 @@ describe('handleBeforeToolCall', () => {
 
     handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
 
-    const attrs = mockTracerInstance.startSpan.mock.calls[0][1].attributes;
+    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1) as
+      | [string, { attributes: Record<string, unknown> }, unknown]
+      | undefined;
+    expect(lastCall).toBeDefined();
+    const attrs = lastCall![1].attributes;
     expect(attrs).not.toHaveProperty('gen_ai.tool.call.arguments');
   });
 
@@ -209,10 +261,92 @@ describe('handleBeforeToolCall', () => {
 
     handleBeforeToolCall(event, ctx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
+    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1);
+    expect(lastCall).toEqual([
       'execute_tool Bash',
       expect.anything(),
       expect.anything(),
+    ]);
+  });
+
+  it('creates a running tools group span before the execute_tool span', () => {
+    seedSession('sess-1');
+
+    handleBeforeToolCall(
+      { ...baseEvent, runId: 'run-1' },
+      { ...baseCtx, runId: 'run-1' },
+      createTestConfig(),
     );
+
+    expect(mockTracerInstance.startSpan).toHaveBeenNthCalledWith(
+      1,
+      'running 1 tool',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          tools: ['Read'],
+          'logfire.msg': 'running 1 tool',
+        }),
+      }),
+      expect.anything(),
+    );
+    expect(mockTracerInstance.startSpan).toHaveBeenNthCalledWith(
+      2,
+      'execute_tool Read',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('reuses a recent idle tool group within the same batch window', () => {
+    seedSession('sess-1');
+
+    handleBeforeToolCall(
+      { ...baseEvent, runId: 'run-1' },
+      { ...baseCtx, runId: 'run-1' },
+      createTestConfig(),
+    );
+
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    const toolGroup = session.activeToolGroups.get('run-1');
+    if (!toolGroup) throw new Error('expected tool group');
+    toolGroup.openToolCount = 0;
+    toolGroup.endTime = Date.now();
+
+    handleBeforeToolCall(
+      { toolName: 'Write', params: { path: '/tmp/a' }, runId: 'run-1' },
+      { ...baseCtx, toolName: 'Write', runId: 'run-1' },
+      createTestConfig(),
+    );
+
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(3);
+    expect(mockRunningToolsSpan.end).not.toHaveBeenCalled();
+    expect(toolGroup.toolNames).toEqual(['Read', 'Write']);
+  });
+
+  it('starts a new tool group after the previous one is removed', () => {
+    seedSession('sess-1');
+
+    handleBeforeToolCall(
+      { ...baseEvent, runId: 'run-1' },
+      { ...baseCtx, runId: 'run-1' },
+      createTestConfig(),
+    );
+
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    const toolGroup = session.activeToolGroups.get('run-1');
+    if (!toolGroup) throw new Error('expected tool group');
+    session.activeToolGroups.delete('run-1');
+
+    handleBeforeToolCall(
+      { toolName: 'Write', params: { path: '/tmp/a' }, runId: 'run-1' },
+      { ...baseCtx, toolName: 'Write', runId: 'run-1' },
+      createTestConfig(),
+    );
+
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(4);
+    expect(mockRunningToolsSpan.end).not.toHaveBeenCalled();
+    expect(spanStore.getToolGroup('sess-1', 'run-1')?.toolNames).toEqual(['Write']);
   });
 });

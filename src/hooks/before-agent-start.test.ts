@@ -78,6 +78,30 @@ describe('handleBeforeAgentStart', () => {
     expect(session!.tokens).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
+  it('stores initial history messages from before_agent_start', () => {
+    const ctx: AgentContext = {
+      agentId: 'my-agent',
+      sessionKey: 'session-1',
+    };
+
+    handleBeforeAgentStart(
+      {
+        ...baseEvent,
+        messages: [
+          { role: 'user', content: '历史问题' },
+          { role: 'assistant', content: '历史回答' },
+        ],
+      },
+      ctx,
+      config,
+    );
+
+    expect(spanStore.get('session-1')?.initialHistoryMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: '历史问题' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: '历史回答' }] },
+    ]);
+  });
+
   it('creates a span with correct name and attributes', () => {
     const ctx: AgentContext = {
       agentId: 'my-agent',

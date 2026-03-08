@@ -10,7 +10,14 @@ import { SpanStatusCode } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
 import { buildLogfireTraceUrl } from '../trace-link.js';
 import { recordOperationDuration } from '../metrics/genai-metrics.js';
-import { extractWorkspaceName, extractErrorDetails } from '../util.js';
+import {
+  extractWorkspaceName,
+  extractErrorDetails,
+  buildMessagesFromConversationHistory,
+  extractFinalResult,
+  LOGFIRE_JSON_SCHEMA_KEY,
+  PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
+} from '../util.js';
 import type { LogfirePluginConfig } from '../config.js';
 import type { AgentContext } from './before-agent-start.js';
 
@@ -30,7 +37,9 @@ export interface Logger {
   error(msg: string): void;
 }
 
-export function handleAgentEnd(
+const LLM_OUTPUT_WATCHDOG_MS = 10_000;
+
+function finalizeAgentEndNow(
   event: AgentEndEvent,
   ctx: AgentContext,
   config: LogfirePluginConfig,
@@ -65,11 +74,12 @@ export function handleAgentEnd(
   for (let i = session.toolStack.length - 1; i >= 0; i--) {
     session.toolStack[i].span.end();
   }
+  for (const toolGroup of session.activeToolGroups.values()) {
+    toolGroup.span.end(toolGroup.endTime);
+  }
 
   // Close any pending LLM spans (aborted mid-call)
-  for (const llm of [...session.llmSpans.values()].reverse()) {
-    llm.span.end();
-  }
+  session.llmSpans.clear();
 
   // Duration and tool count
   session.agentSpan.setAttribute('openclaw.request.duration_ms', durationMs);
@@ -95,9 +105,40 @@ export function handleAgentEnd(
   if (session.model) {
     session.agentSpan.setAttribute('gen_ai.request.model', session.model);
     session.agentSpan.setAttribute('gen_ai.response.model', session.model);
+    session.agentSpan.setAttribute('model_name', session.model);
   }
   if (session.provider) {
     session.agentSpan.setAttribute('gen_ai.provider.name', session.provider);
+  }
+
+  const fullConversationMessages = buildMessagesFromConversationHistory(event.messages);
+  if (fullConversationMessages.length > 0) {
+    session.latestAllMessages = fullConversationMessages;
+  }
+
+  if (session.latestAllMessages && session.latestAllMessages.length > 0) {
+    session.agentSpan.setAttribute(
+      'pydantic_ai.all_messages',
+      JSON.stringify(session.latestAllMessages),
+    );
+    session.agentSpan.setAttribute(
+      LOGFIRE_JSON_SCHEMA_KEY,
+      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
+    );
+    const finalResult = extractFinalResult(session.latestAllMessages);
+    if (finalResult) {
+      session.agentSpan.setAttribute('final_result', finalResult);
+    }
+  }
+  if (session.latestSystemInstructions && session.latestSystemInstructions.length > 0) {
+    session.agentSpan.setAttribute(
+      'gen_ai.system_instructions',
+      JSON.stringify(session.latestSystemInstructions),
+    );
+    session.agentSpan.setAttribute(
+      LOGFIRE_JSON_SCHEMA_KEY,
+      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
+    );
   }
 
   // Error status
@@ -114,6 +155,14 @@ export function handleAgentEnd(
       code: SpanStatusCode.ERROR,
       message: errorMsg,
     });
+
+    // 出错时打出模型与输入摘要，便于排查 LLM timeout 等
+    const modelStr = session.model ?? 'unknown';
+    const runIdStr = session.lastLlmRunId ?? '';
+    const inputPreview = (session.lastLlmPrompt ?? '').replace(/\s+/g, ' ').trim();
+    logger.error(
+      `[agent/embedded] agent error context: model=${modelStr} runId=${runIdStr} inputPreview=${inputPreview || '(none)'}`,
+    );
 
     // Record structured exception per OTEL semantic conventions.
     // recordException() expects Error | string — construct a real Error instance.
@@ -155,4 +204,63 @@ export function handleAgentEnd(
 
   // Cleanup
   spanStore.delete(sessionKey);
+}
+
+export function maybeFinalizeDeferredAgentEnd(sessionKey: string): boolean {
+  const session = spanStore.get(sessionKey);
+  if (!session?.deferredAgentEnd) return false;
+  if (session.llmSpans.size > 0) return false;
+
+  const { event, ctx, config, logger } = session.deferredAgentEnd;
+  session.deferredAgentEnd = undefined;
+  finalizeAgentEndNow(event, ctx, config, logger);
+  return true;
+}
+
+function forceFinalizeDeferredAgentEnd(sessionKey: string): boolean {
+  const session = spanStore.get(sessionKey);
+  if (!session?.deferredAgentEnd) return false;
+
+  const { event, ctx, config, logger } = session.deferredAgentEnd;
+  session.deferredAgentEnd = undefined;
+  finalizeAgentEndNow(event, ctx, config, logger);
+  return true;
+}
+
+export function handleAgentEnd(
+  event: AgentEndEvent,
+  ctx: AgentContext,
+  config: LogfirePluginConfig,
+  logger: Logger,
+): void {
+  const sessionKey =
+    typeof ctx.sessionKey === 'string' && ctx.sessionKey.length > 0
+      ? ctx.sessionKey
+      : typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0
+        ? ctx.sessionId
+        : undefined;
+  if (!sessionKey) return;
+
+  const session = spanStore.get(sessionKey);
+  if (!session) return;
+
+  // 主路径：真的等到最后一个 llm_output 收尾后再结束 agent span。
+  // 仅当 llm_output 丢失时，watchdog 才兜底强制收尾，避免悬挂 session。
+  if (session.llmSpans.size > 0) {
+    if (!session.deferredAgentEnd) {
+      session.deferredAgentEnd = {
+        event,
+        ctx,
+        config,
+        logger,
+        requestedAt: Date.now(),
+      };
+      setTimeout(() => {
+        forceFinalizeDeferredAgentEnd(sessionKey);
+      }, LLM_OUTPUT_WATCHDOG_MS);
+    }
+    return;
+  }
+
+  finalizeAgentEndNow(event, ctx, config, logger);
 }

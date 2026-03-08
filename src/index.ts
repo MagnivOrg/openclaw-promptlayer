@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /**
- * @ultrathink-solutions/openclaw-logfire
+ * @shichen335/openclaw-logfire
  *
  * Pydantic Logfire observability plugin for OpenClaw.
  * OTEL GenAI semantic convention compliant.
@@ -21,6 +21,7 @@ import { handleAgentEnd } from './hooks/agent-end.js';
 import { handleMessageReceived } from './hooks/message-received.js';
 import { handleLlmInput } from './hooks/llm-input.js';
 import { handleLlmOutput } from './hooks/llm-output.js';
+import { persistRawHookPayload } from './hook-raw-log.js';
 import type { NodeSDK } from '@opentelemetry/sdk-node';
 import type { BeforeAgentStartEvent, AgentContext } from './hooks/before-agent-start.js';
 import type { BeforeToolCallEvent, ToolContext } from './hooks/before-tool-call.js';
@@ -61,6 +62,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 let sdk: NodeSDK | null = null;
 
+function persistRawHookPayloadIfEnabled(
+  enabled: boolean,
+  hook: string,
+  event: unknown,
+  ctx: unknown,
+): void {
+  if (!enabled) return;
+  persistRawHookPayload(hook, event, ctx);
+}
+
 export default function register(api: PluginApi): void {
   // pluginConfig is the plugin-specific config from plugins.entries.<id>.config.
   // api.config is the full openclaw.json — DO NOT use it for plugin settings.
@@ -86,6 +97,7 @@ export default function register(api: PluginApi): void {
   // Register lifecycle hooks — OpenClaw passes (event, ctx) to each handler.
   // Types are asserted at the boundary since the SDK provides untyped payloads.
   api.on('before_agent_start', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'before_agent_start', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleBeforeAgentStart(
@@ -99,6 +111,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('before_tool_call', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'before_tool_call', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleBeforeToolCall(
@@ -112,6 +125,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('tool_result_persist', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'tool_result_persist', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleToolResultPersist(
@@ -125,6 +139,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('agent_end', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'agent_end', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleAgentEnd(
@@ -139,6 +154,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('message_received', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'message_received', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleMessageReceived(
@@ -152,6 +168,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('llm_input', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'llm_input', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleLlmInput(event as unknown as LlmInputEvent, ctx as unknown as LlmContext, config);
@@ -161,6 +178,7 @@ export default function register(api: PluginApi): void {
   });
 
   api.on('llm_output', (event, ctx) => {
+    persistRawHookPayloadIfEnabled(config.saveHookLogs, 'llm_output', event, ctx);
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
       handleLlmOutput(event as unknown as LlmOutputEvent, ctx as unknown as LlmContext, config);

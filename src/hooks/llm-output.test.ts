@@ -1,26 +1,76 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
-import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
+import { mockSpan, mockContext, createTestConfig, createMockLogger } from '../test-helpers.js';
 import { handleLlmOutput } from './llm-output.js';
 import type { LlmOutputEvent } from './llm-output.js';
 import type { LlmContext } from './llm-input.js';
+import { handleAgentEnd } from './agent-end.js';
 
-// Mock metrics and inference-details to verify they get called
 vi.mock('../metrics/genai-metrics.js', () => ({
   recordTokenUsage: vi.fn(),
 }));
 
-vi.mock('../events/inference-details.js', () => ({
-  emitInferenceDetailsEvent: vi.fn(),
-}));
+const { mockTracerInstance, createdSpans } = vi.hoisted(() => {
+  interface MockTestSpan {
+    end: ReturnType<typeof vi.fn>;
+    spanContext: ReturnType<typeof vi.fn>;
+    setAttribute: ReturnType<typeof vi.fn>;
+    setStatus: ReturnType<typeof vi.fn>;
+    addEvent: ReturnType<typeof vi.fn>;
+    addLink: ReturnType<typeof vi.fn>;
+    recordException: ReturnType<typeof vi.fn>;
+    isRecording: ReturnType<typeof vi.fn>;
+    updateName: ReturnType<typeof vi.fn>;
+    setAttributes: ReturnType<typeof vi.fn>;
+  }
+
+  interface CreatedSpanRecord {
+    name: string;
+    options: Record<string, unknown>;
+    span: MockTestSpan;
+  }
+
+  const spanRecords: CreatedSpanRecord[] = [];
+  const createSpan = (): MockTestSpan => ({
+    end: vi.fn(),
+    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
+    setAttribute: vi.fn().mockReturnThis(),
+    setStatus: vi.fn().mockReturnThis(),
+    addEvent: vi.fn().mockReturnThis(),
+    addLink: vi.fn().mockReturnThis(),
+    recordException: vi.fn().mockReturnThis(),
+    isRecording: vi.fn(() => true),
+    updateName: vi.fn().mockReturnThis(),
+    setAttributes: vi.fn().mockReturnThis(),
+  });
+  return {
+    createdSpans: spanRecords,
+    mockTracerInstance: {
+      startSpan: vi.fn((name: string, options: Record<string, unknown>) => {
+        const span = createSpan();
+        spanRecords.push({ name, options, span });
+        return span;
+      }),
+    },
+  };
+});
+
+vi.mock('@opentelemetry/api', async () => {
+  const actual = await vi.importActual<typeof import('@opentelemetry/api')>('@opentelemetry/api');
+  return {
+    ...actual,
+    trace: {
+      ...actual.trace,
+      getTracer: vi.fn(() => mockTracerInstance),
+    },
+  };
+});
 
 import { recordTokenUsage } from '../metrics/genai-metrics.js';
-import { emitInferenceDetailsEvent } from '../events/inference-details.js';
 
 function seedSessionWithLlm(sessionKey: string, runId: string) {
   const agentSpan = mockSpan();
-  const llmSpan = mockSpan();
   const agentCtx = mockContext();
 
   spanStore.set(sessionKey, {
@@ -28,37 +78,45 @@ function seedSessionWithLlm(sessionKey: string, runId: string) {
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
     startTime: Date.now(),
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: [],
   });
 
   spanStore.setLlmSpan(sessionKey, runId, {
-    span: llmSpan,
-    ctx: mockContext(),
     runId,
+    agentName: 'my-agent',
     provider: 'anthropic',
     model: 'claude-sonnet-4-5-20250929',
     startTime: Date.now(),
+    inputMessages: [],
+    systemInstructions: [],
   });
 
-  return { agentSpan, llmSpan };
+  return { agentSpan };
 }
 
 describe('handleLlmOutput', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
+    createdSpans.length = 0;
     spanStore.delete('sess-1');
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     spanStore.delete('sess-1');
   });
 
   const baseEvent: LlmOutputEvent = {
     runId: 'run-1',
-    sessionId: 'sess-1',
     provider: 'anthropic',
     model: 'claude-sonnet-4-5-20250929',
     assistantTexts: ['Hello!'],
@@ -89,56 +147,58 @@ describe('handleLlmOutput', () => {
   });
 
   it('accumulates across multiple LLM calls', () => {
-    const { llmSpan: llmSpan1 } = seedSessionWithLlm('sess-1', 'run-1');
+    seedSessionWithLlm('sess-1', 'run-1');
 
     handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
-    // Seed another LLM span for a second call
-    const llmSpan2 = mockSpan();
     spanStore.setLlmSpan('sess-1', 'run-2', {
-      span: llmSpan2,
-      ctx: mockContext(),
       runId: 'run-2',
+      agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now(),
+      inputMessages: [],
+      systemInstructions: [],
     });
 
-    const secondEvent: LlmOutputEvent = {
-      ...baseEvent,
-      runId: 'run-2',
-      usage: { input: 50, output: 25 },
-    };
-
-    handleLlmOutput(secondEvent, baseCtx, createTestConfig());
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        runId: 'run-2',
+        usage: { input: 50, output: 25 },
+      },
+      baseCtx,
+      createTestConfig(),
+    );
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(150);
     expect(session.tokens.output).toBe(75);
   });
 
-  it('sets token attributes on the LLM span', () => {
-    const { llmSpan } = seedSessionWithLlm('sess-1', 'run-1');
+  it('creates and ends a synthetic chat span with usage attributes', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
 
     handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
-    expect(llmSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.input_tokens', 100);
-    expect(llmSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.output_tokens', 50);
-    expect(llmSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_read_tokens', 200);
-    expect(llmSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_write_tokens', 80);
-    expect(llmSpan.setAttribute).toHaveBeenCalledWith('gen_ai.response.model', 'claude-sonnet-4-5-20250929');
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(createdSpans[0].name).toBe('chat claude-sonnet-4-5-20250929');
+    expect(createdSpans[0].options).toMatchObject({
+      kind: expect.any(Number),
+      attributes: expect.objectContaining({
+        'gen_ai.operation.name': 'chat',
+        'gen_ai.response.model': 'claude-sonnet-4-5-20250929',
+        'gen_ai.usage.input_tokens': 100,
+        'gen_ai.usage.output_tokens': 50,
+        'openclaw.usage.cache_read_tokens': 200,
+        'openclaw.usage.cache_write_tokens': 80,
+      }),
+    });
+    expect(createdSpans[0].span.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
+    expect(createdSpans[0].span.end).toHaveBeenCalled();
   });
 
-  it('ends the LLM span with OK status', () => {
-    const { llmSpan } = seedSessionWithLlm('sess-1', 'run-1');
-
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
-
-    expect(llmSpan.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
-    expect(llmSpan.end).toHaveBeenCalled();
-  });
-
-  it('removes the LLM span from the store after closing', () => {
+  it('removes the LLM metadata from the store after reconstruction', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
     handleLlmOutput(baseEvent, baseCtx, createTestConfig());
@@ -148,9 +208,8 @@ describe('handleLlmOutput', () => {
 
   it('records token metrics when enableMetrics is true', () => {
     seedSessionWithLlm('sess-1', 'run-1');
-    const config = createTestConfig({ enableMetrics: true });
 
-    handleLlmOutput(baseEvent, baseCtx, config);
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ enableMetrics: true }));
 
     expect(recordTokenUsage).toHaveBeenCalledWith(
       100,
@@ -178,35 +237,253 @@ describe('handleLlmOutput', () => {
     expect(recordTokenUsage).not.toHaveBeenCalled();
   });
 
-  it('emits inference details event when captureInferenceEvents is true', () => {
-    const { llmSpan } = seedSessionWithLlm('sess-1', 'run-1');
-    const config = createTestConfig({ captureInferenceEvents: true });
-
-    handleLlmOutput(baseEvent, baseCtx, config);
-
-    expect(emitInferenceDetailsEvent).toHaveBeenCalledWith(
-      llmSpan,
-      expect.objectContaining({
-        model: 'claude-sonnet-4-5-20250929',
-        inputTokens: 100,
-        outputTokens: 50,
-      }),
-    );
-  });
-
-  it('does not emit inference details when captureInferenceEvents is false', () => {
+  it('writes gen_ai.output.messages onto the reconstructed chat span', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: 'Hi there' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
 
-    expect(emitInferenceDetailsEvent).not.toHaveBeenCalled();
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    expect(spanAttributes['gen_ai.output.messages']).toContain('"type":"text"');
+    expect(spanAttributes['gen_ai.response.finish_reasons']).toEqual(['stop']);
+    expect(spanAttributes['logfire.json_schema']).toContain('"gen_ai.output.messages"');
+    expect(spanStore.get('sess-1')?.latestAllMessages).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'Hi there' }],
+        finish_reason: 'stop',
+      },
+    ]);
+  });
+
+  it('falls back to assistantTexts when lastAssistant is missing', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: undefined,
+        assistantTexts: ['第一段', '第二段'],
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    expect(spanAttributes['gen_ai.output.messages']).toContain('第一段');
+    expect(spanStore.get('sess-1')?.latestAllMessages).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: '第一段\n第二段' }],
+        finish_reason: 'stop',
+      },
+    ]);
+  });
+
+  it('rebuilds chat into multiple phases when deferred messages contain tool usage', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    session.deferredAgentEnd = {
+      event: {
+        success: true,
+        messages: [
+          { role: 'user', content: '请写文件' },
+          {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } }],
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'write',
+            content: [{ type: 'text', text: '写入成功' }],
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: '<final>已经写好啦</final>' }],
+          },
+        ],
+      },
+      ctx: { agentId: 'my-agent', sessionKey: 'sess-1', workspaceDir: '/workspaces/marketing' },
+      config: createTestConfig(),
+      logger: createMockLogger(),
+      requestedAt: Date.now(),
+    };
+    session.completedToolCalls = [
+      {
+        runId: 'run-1',
+        name: 'write',
+        callId: 'call-1',
+        startTime: Date.now(),
+        endTime: Date.now() + 20,
+        params: { file: '/tmp/a' },
+        result: '写入成功',
+      },
+    ];
+    spanStore.setLlmSpan('sess-1', 'run-1', {
+      runId: 'run-1',
+      agentName: 'my-agent',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      startTime: Date.now() - 20,
+      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: '请写文件' }] }],
+      systemInstructions: [],
+    });
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: '最后一条' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    expect(createdSpans).toHaveLength(2);
+    const firstPhaseAttributes = createdSpans[0].options.attributes as Record<string, string | string[]>;
+    const secondPhaseAttributes = createdSpans[1].options.attributes as Record<string, string | string[]>;
+    expect(firstPhaseAttributes['gen_ai.output.messages']).toContain('"tool_call"');
+    expect(firstPhaseAttributes['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+    expect(secondPhaseAttributes['gen_ai.input.messages']).toContain('"tool_call_response"');
+    expect(secondPhaseAttributes['gen_ai.output.messages']).toContain('已经写好啦');
+  });
+
+  it('assigns per-phase usage from deferred assistant messages', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    session.deferredAgentEnd = {
+      event: {
+        success: true,
+        messages: [
+          { role: 'user', content: '请读取并总结' },
+          {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } }],
+            usage: { input: 120, output: 30, cacheRead: 10 },
+          },
+          {
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'read',
+            content: [{ type: 'text', text: '读取成功' }],
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: '<final>总结完成</final>' }],
+            usage: { input: 80, output: 20, cacheRead: 5 },
+          },
+        ],
+      },
+      ctx: { agentId: 'my-agent', sessionKey: 'sess-1', workspaceDir: '/workspaces/marketing' },
+      config: createTestConfig(),
+      logger: createMockLogger(),
+      requestedAt: Date.now(),
+    };
+    session.completedToolCalls = [
+      {
+        runId: 'run-1',
+        name: 'read',
+        callId: 'call-1',
+        startTime: Date.now(),
+        endTime: Date.now() + 20,
+        params: { path: '/tmp/a' },
+        result: '读取成功',
+      },
+    ];
+    spanStore.setLlmSpan('sess-1', 'run-1', {
+      runId: 'run-1',
+      agentName: 'my-agent',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      startTime: Date.now() - 20,
+      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: '请读取并总结' }] }],
+      systemInstructions: [],
+    });
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: '总结完成' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    expect(createdSpans).toHaveLength(2);
+    const firstPhaseAttributes = createdSpans[0].options.attributes as Record<string, number | string[]>;
+    const secondPhaseAttributes = createdSpans[1].options.attributes as Record<string, number | string[]>;
+    expect(firstPhaseAttributes['gen_ai.usage.input_tokens']).toBe(120);
+    expect(firstPhaseAttributes['gen_ai.usage.output_tokens']).toBe(30);
+    expect(firstPhaseAttributes['openclaw.usage.cache_read_tokens']).toBe(10);
+    expect(secondPhaseAttributes['gen_ai.usage.input_tokens']).toBe(80);
+    expect(secondPhaseAttributes['gen_ai.usage.output_tokens']).toBe(20);
+    expect(secondPhaseAttributes['openclaw.usage.cache_read_tokens']).toBe(5);
+  });
+
+  it('omits duplicated system messages from child chat input when system instructions exist', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+    spanStore.setLlmSpan('sess-1', 'run-1', {
+      runId: 'run-1',
+      agentName: 'my-agent',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+      startTime: Date.now() - 20,
+      inputMessages: [
+        { role: 'system', parts: [{ type: 'text', content: '系统提示词' }] },
+        { role: 'user', parts: [{ type: 'text', content: '你好' }] },
+      ],
+      systemInstructions: [{ type: 'text', content: '系统提示词' }],
+    });
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: 'Hi there' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    expect(spanAttributes['gen_ai.system_instructions']).toContain('系统提示词');
+    expect(spanAttributes['gen_ai.input.messages']).not.toContain('"role":"system"');
+    expect(spanAttributes['gen_ai.input.messages']).toContain('"role":"user"');
+  });
+
+  it('does not set legacy events attribute', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: 'Hi there' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, unknown>;
+    expect(spanAttributes.events).toBeUndefined();
   });
 
   it('handles missing usage gracefully', () => {
     seedSessionWithLlm('sess-1', 'run-1');
-    const event: LlmOutputEvent = { ...baseEvent, usage: undefined };
 
-    handleLlmOutput(event, baseCtx, createTestConfig());
+    handleLlmOutput({ ...baseEvent, usage: undefined }, baseCtx, createTestConfig());
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(0);
@@ -215,12 +492,15 @@ describe('handleLlmOutput', () => {
 
   it('handles partial usage (only input tokens)', () => {
     seedSessionWithLlm('sess-1', 'run-1');
-    const event: LlmOutputEvent = {
-      ...baseEvent,
-      usage: { input: 100 },
-    };
 
-    handleLlmOutput(event, baseCtx, createTestConfig());
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        usage: { input: 100 },
+      },
+      baseCtx,
+      createTestConfig(),
+    );
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
@@ -229,13 +509,16 @@ describe('handleLlmOutput', () => {
 
   it('updates session model/provider to latest', () => {
     seedSessionWithLlm('sess-1', 'run-1');
-    const event: LlmOutputEvent = {
-      ...baseEvent,
-      provider: 'openai',
-      model: 'gpt-4o',
-    };
 
-    handleLlmOutput(event, baseCtx, createTestConfig());
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        provider: 'openai',
+        model: 'gpt-4o',
+      },
+      baseCtx,
+      createTestConfig(),
+    );
 
     const session = spanStore.get('sess-1')!;
     expect(session.model).toBe('gpt-4o');
@@ -245,29 +528,52 @@ describe('handleLlmOutput', () => {
   it('returns early when no session key exists', () => {
     handleLlmOutput(baseEvent, {}, createTestConfig());
 
-    // No error thrown, nothing happens
     expect(recordTokenUsage).not.toHaveBeenCalled();
   });
 
-  it('handles missing LLM span gracefully (still accumulates tokens)', () => {
-    // Seed session but WITHOUT an LLM span for this runId
+  it('handles missing LLM metadata gracefully while still accumulating tokens', () => {
     const agentSpan = mockSpan();
     spanStore.set('sess-1', {
       agentSpan,
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedToolCalls: [],
+      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,
       startTime: Date.now(),
+      latestAllMessages: [],
+      latestSystemInstructions: [],
+      initialHistoryMessages: [],
     });
 
     handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
-    // Tokens still accumulate even without a matching LLM span
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
     expect(session.tokens.output).toBe(50);
+    expect(createdSpans).toHaveLength(0);
+  });
+
+  it('finalizes deferred agent_end when the last llm_output arrives', () => {
+    const { agentSpan } = seedSessionWithLlm('sess-1', 'run-1');
+    const logger = createMockLogger();
+
+    handleAgentEnd(
+      { messages: [], success: true },
+      { agentId: 'my-agent', sessionKey: 'sess-1', workspaceDir: '/workspaces/marketing' },
+      createTestConfig(),
+      logger,
+    );
+
+    expect(agentSpan.end).not.toHaveBeenCalled();
+    expect(spanStore.get('sess-1')?.deferredAgentEnd).toBeDefined();
+
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
+
+    expect(agentSpan.end).toHaveBeenCalled();
+    expect(spanStore.get('sess-1')).toBeUndefined();
   });
 });

@@ -31,6 +31,8 @@ export interface LogfirePluginConfig {
 
   // GenAI provider
   providerName: string;
+  /** Map OpenClaw provider id to OTel name, e.g. { "gmn": "openai" } */
+  providerNameMap: Record<string, string>;
 
   // Trace depth
   captureToolInput: boolean;
@@ -39,8 +41,12 @@ export interface LogfirePluginConfig {
   toolOutputMaxLength: number;
   captureStackTraces: boolean;
   captureMessageContent: boolean;
+  /** Record multi-turn history so chat spans and root pydantic_ai.all_messages can be reconstructed. */
+  captureHistoryMessages: boolean;
+  /** Max character length for serialized message arrays captured on spans. */
+  historyMessagesMaxLength: number;
+  /** Best-effort capture for tool definitions on chat spans when the current hook payload can provide them. */
   captureToolDefinitions: boolean;
-  captureInferenceEvents: boolean;
   redactSecrets: boolean;
 
   // Distributed tracing
@@ -52,12 +58,19 @@ export interface LogfirePluginConfig {
 
   // Output
   enableTraceLinks: boolean;
+  /** Persist raw OpenClaw hook payloads to ~/.openclaw/logs for debugging. */
+  saveHookLogs: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 
   // Advanced
   resourceAttributes: Record<string, string>;
   spanProcessorType: 'batch' | 'simple';
   batchConfig: BatchConfig;
+  /**
+   * 兼容旧配置保留；当前 mixed span 路径固定使用 pydantic-ai scope。
+   * 未来如无兼容需求可移除此字段。
+   */
+  useGenAiCompatibilityScope: boolean;
 }
 
 const DEFAULTS: LogfirePluginConfig = {
@@ -67,6 +80,7 @@ const DEFAULTS: LogfirePluginConfig = {
   environment: '',
   serviceName: 'openclaw-agent',
   providerName: '',
+  providerNameMap: {},
 
   captureToolInput: true,
   captureToolOutput: false,
@@ -74,8 +88,9 @@ const DEFAULTS: LogfirePluginConfig = {
   toolOutputMaxLength: 512,
   captureStackTraces: true,
   captureMessageContent: false,
+  captureHistoryMessages: false,
+  historyMessagesMaxLength: 16384,
   captureToolDefinitions: false,
-  captureInferenceEvents: false,
   redactSecrets: true,
 
   distributedTracing: {
@@ -89,6 +104,7 @@ const DEFAULTS: LogfirePluginConfig = {
   metricsIntervalMs: 60_000,
 
   enableTraceLinks: true,
+  saveHookLogs: false,
   logLevel: 'info',
 
   resourceAttributes: {},
@@ -98,6 +114,7 @@ const DEFAULTS: LogfirePluginConfig = {
     maxExportBatchSize: 512,
     scheduledDelayMs: 5000,
   },
+  useGenAiCompatibilityScope: true,
 };
 
 /**
@@ -132,6 +149,8 @@ export function resolveConfig(
       asString(raw.providerName) ||
       process.env.LOGFIRE_PROVIDER_NAME ||
       DEFAULTS.providerName,
+    providerNameMap:
+      asStringRecord(raw.providerNameMap) ?? DEFAULTS.providerNameMap,
 
     captureToolInput: asBool(raw.captureToolInput) ?? DEFAULTS.captureToolInput,
     captureToolOutput:
@@ -144,10 +163,12 @@ export function resolveConfig(
       asBool(raw.captureStackTraces) ?? DEFAULTS.captureStackTraces,
     captureMessageContent:
       asBool(raw.captureMessageContent) ?? DEFAULTS.captureMessageContent,
+    captureHistoryMessages:
+      asBool(raw.captureHistoryMessages) ?? DEFAULTS.captureHistoryMessages,
+    historyMessagesMaxLength:
+      asInt(raw.historyMessagesMaxLength) ?? DEFAULTS.historyMessagesMaxLength,
     captureToolDefinitions:
       asBool(raw.captureToolDefinitions) ?? DEFAULTS.captureToolDefinitions,
-    captureInferenceEvents:
-      asBool(raw.captureInferenceEvents) ?? DEFAULTS.captureInferenceEvents,
     redactSecrets: asBool(raw.redactSecrets) ?? DEFAULTS.redactSecrets,
 
     distributedTracing: {
@@ -170,6 +191,7 @@ export function resolveConfig(
       asInt(raw.metricsIntervalMs) ?? DEFAULTS.metricsIntervalMs,
 
     enableTraceLinks: asBool(raw.enableTraceLinks) ?? DEFAULTS.enableTraceLinks,
+    saveHookLogs: asBool(raw.saveHookLogs) ?? DEFAULTS.saveHookLogs,
     logLevel:
       asEnum(raw.logLevel, ['debug', 'info', 'warn', 'error']) ??
       DEFAULTS.logLevel,
@@ -189,6 +211,9 @@ export function resolveConfig(
         asInt(batchConfigRaw.scheduledDelayMs) ??
         DEFAULTS.batchConfig.scheduledDelayMs,
     },
+    useGenAiCompatibilityScope:
+      asBool(raw.useGenAiCompatibilityScope) ??
+      DEFAULTS.useGenAiCompatibilityScope,
   };
 }
 

@@ -1,27 +1,38 @@
-# @ultrathink-solutions/openclaw-logfire
+# @shichen335/openclaw-logfire
 
-[![npm version](https://img.shields.io/npm/v/@ultrathink-solutions/openclaw-logfire)](https://www.npmjs.com/package/@ultrathink-solutions/openclaw-logfire)
+[![npm version](https://img.shields.io/npm/v/@shichen335/openclaw-logfire)](https://www.npmjs.com/package/@shichen335/openclaw-logfire)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Pydantic [Logfire](https://pydantic.dev/logfire) observability plugin for [OpenClaw](https://openclaw.ai).
+`openclaw-logfire` sends OpenClaw agent activity to [Pydantic Logfire](https://pydantic.dev/logfire) as OTLP traces and metrics.
 
-Full agent lifecycle tracing aligned with [OTEL GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — tool calls, token metrics, error stack traces, and optional distributed tracing across services.
+It captures the real execution shape of an OpenClaw run:
 
-> **Real-world context:** We built this plugin as part of deploying OpenClaw into production on the [Ultrathink Axon platform](https://ultrathinksolutions.com/the-signal/openclaw-to-production/). The architecture and design decisions are detailed in that post.
+- one root `invoke_agent` span per agent invocation
+- staged `chat <model>` spans reconstructed from `llm_input` and `llm_output`
+- one `execute_tool <tool>` span per tool call
+- token usage metrics and cumulative session usage
+- optional `traceparent` injection for HTTP commands such as `curl`, `wget`, `http`, and `httpie`
 
-## Quickstart
+The plugin is designed around the latest OpenClaw hook flow and OTEL GenAI semantic conventions, while staying practical about privacy controls and debugging.
+
+## Requirements
+
+- OpenClaw `>= 2026.2.1`
+- Node.js `>= 20`
+- A Logfire `write token`
+- Network access to Logfire OTLP endpoints:
+  - `https://logfire-us.pydantic.dev`
+  - `https://logfire-eu.pydantic.dev`
+
+## Install
+
+For most users, install it as an OpenClaw plugin:
 
 ```bash
-npm install @ultrathink-solutions/openclaw-logfire
+openclaw plugins install @shichen335/openclaw-logfire
 ```
 
-Set your Logfire write token:
-
-```bash
-export LOGFIRE_TOKEN="your-token"
-```
-
-Add to `openclaw.json`:
+Then enable it in `openclaw.json`:
 
 ```json
 {
@@ -36,59 +47,54 @@ Add to `openclaw.json`:
 }
 ```
 
-Restart OpenClaw. That's it — traces appear in your Logfire dashboard.
+The plugin id must be `openclaw-logfire`.
 
-## What You Get
+## Get A Logfire Write Token
 
-### Span Hierarchy
+This plugin uses a Logfire `write token`. The environment variable name is `LOGFIRE_TOKEN`.
 
-Every agent invocation produces a trace tree:
+1. Open [Logfire Login](https://logfire.pydantic.dev/login) and sign up or sign in.
+2. If this is your first time in Logfire, finish the onboarding flow.
+3. If you want a dedicated project for OpenClaw, open `Organization > Projects` and create one.
+4. Open the target project.
+5. Go to `Settings > Write tokens`.
+6. Click `New write token`.
+7. Copy the token immediately. Logfire does not show the full token again later.
+8. Export it in your shell:
 
+```bash
+export LOGFIRE_TOKEN="<your-write-token>"
 ```
-invoke_agent my-agent                (root span, cumulative tokens)
-  |-- gen_ai.chat anthropic          (LLM call: model, input/output tokens)
-  |-- execute_tool Read              (file read)
-  |-- execute_tool exec              (shell command)
-  |-- gen_ai.chat anthropic          (LLM call: model, input/output tokens)
-  |-- execute_tool Write             (file write)
-  |-- gen_ai.chat anthropic          (LLM call: model, input/output tokens)
+
+Useful official links:
+
+- [Logfire Getting Started](https://docs.pydantic.dev/logfire/)
+- [Create Write Tokens](https://docs.pydantic.dev/logfire/how-to-guides/create-write-tokens/)
+
+## Quick Start
+
+Minimal configuration:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-logfire": {
+        "enabled": true,
+        "config": {}
+      }
+    }
+  }
+}
 ```
 
-### Attributes (OTEL GenAI Semantic Conventions)
+Then restart OpenClaw. The plugin reads `LOGFIRE_TOKEN` at runtime and starts exporting spans.
 
-| Attribute | Span | Example | Description |
-|-----------|------|---------|-------------|
-| `gen_ai.operation.name` | All | `invoke_agent` | Operation type |
-| `gen_ai.agent.name` | Agent | `my-agent` | Agent identifier |
-| `gen_ai.conversation.id` | Agent | `session_abc123` | Session key |
-| `gen_ai.request.model` | Agent, LLM | `claude-sonnet-4-5-20250929` | Model name |
-| `gen_ai.response.model` | Agent, LLM | `claude-sonnet-4-5-20250929` | Response model |
-| `gen_ai.provider.name` | Agent, LLM | `anthropic` | LLM provider |
-| `gen_ai.usage.input_tokens` | Agent, LLM | `1024` | Input tokens (cumulative on agent) |
-| `gen_ai.usage.output_tokens` | Agent, LLM | `512` | Output tokens (cumulative on agent) |
-| `openclaw.usage.cache_read_tokens` | Agent, LLM | `8192` | Cached prompt tokens read |
-| `openclaw.usage.cache_write_tokens` | Agent, LLM | `4096` | Cached prompt tokens written |
-| `gen_ai.tool.name` | Tool | `Read` | Tool being called |
-| `gen_ai.tool.call.id` | Tool | `call_abc123` | Unique tool call identifier |
-| `gen_ai.tool.call.arguments` | Tool | `{"path": "/..."}` | Tool input (opt-in) |
-| `error.type` | Agent | `AgentError` | Error classification |
-| `openclaw.workspace` | Agent | `my-agent` | Workspace name |
-| `openclaw.channel` | Agent | `slack` | Message source |
+If `LOGFIRE_TOKEN` is missing, the plugin disables itself and logs an error instead of starting half-configured.
 
-### Metrics
+## Recommended Configuration
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gen_ai.client.token.usage` | Histogram | Token counts by type (input/output) |
-| `gen_ai.client.operation.duration` | Histogram | Agent invocation latency (seconds) |
-
-### Error Tracing
-
-Agent-level errors are captured on the root `invoke_agent` span with `error.type` and error status. Errors from tool failures propagate up so the agent span is marked as errored.
-
-## Configuration
-
-All settings are optional. Sensible defaults work out of the box.
+This example is based on a real OpenClaw setup and works well when you want rich debugging and full message capture. Replace placeholders before use.
 
 ```jsonc
 {
@@ -97,34 +103,25 @@ All settings are optional. Sensible defaults work out of the box.
       "openclaw-logfire": {
         "enabled": true,
         "config": {
-          // Logfire project (enables clickable trace links in logs)
-          "projectUrl": "https://logfire.pydantic.dev/myorg/myproject",
-          "region": "us",           // "us" or "eu"
-          "environment": "production",
-          "serviceName": "openclaw-agent",
+          // Prefer LOGFIRE_TOKEN via environment variable.
+          // You can set "token" here, but env var is safer.
+          "projectUrl": "https://logfire.pydantic.dev/<org>/<project>",
 
-          // GenAI provider name for OTEL compliance
-          "providerName": "anthropic",
-
-          // Trace depth controls
-          "captureToolInput": true,       // Record tool arguments
-          "captureToolOutput": false,     // Record tool results (verbose)
-          "toolInputMaxLength": 2048,     // Truncation limit
-          "captureStackTraces": true,     // Stack traces on errors
-          "captureMessageContent": false, // Record message text (privacy)
-          "redactSecrets": true,          // Strip API keys from tool args
-
-          // Distributed tracing (opt-in)
-          "distributedTracing": {
-            "enabled": false,
-            "urlPatterns": ["https://api.mycompany.com/*"]
+          // Map non-standard provider ids to OTel-friendly names.
+          "providerNameMap": {
+            "customprovider": "openai"
           },
 
-          // Metrics
-          "enableMetrics": true,
+          // Full payload capture for debugging.
+          "captureMessageContent": true,
+          "captureHistoryMessages": true,
+          "historyMessagesMaxLength": 100000,
+          "toolInputMaxLength": 100000,
+          "toolOutputMaxLength": 16384,
 
-          // Trace links
-          "enableTraceLinks": true
+          // Privacy and persistence switches.
+          "redactSecrets": false,
+          "saveHookLogs": false
         }
       }
     }
@@ -132,122 +129,244 @@ All settings are optional. Sensible defaults work out of the box.
 }
 ```
 
-### Environment Variables
+Notes:
 
-| Variable | Description |
-|----------|-------------|
-| `LOGFIRE_TOKEN` | Logfire write token (required) |
-| `LOGFIRE_ENVIRONMENT` | Deployment environment fallback |
-| `LOGFIRE_PROJECT_URL` | Project URL fallback |
-| `LOGFIRE_PROVIDER_NAME` | Provider name fallback |
+- `projectUrl` enables clickable trace links when `enableTraceLinks` is on.
+- `providerNameMap` is useful when your OpenClaw provider id is not a standard OTel GenAI provider name.
+- `captureMessageContent: true` also increases what can be captured from tool inputs and outputs. Review privacy expectations before enabling it.
+- `captureToolDefinitions` is accepted by the schema, but it is currently reserved and does not change runtime behavior in `1.0.0`.
 
-### Secret Redaction
+## What The Plugin Captures
 
-When `redactSecrets: true` (default), the plugin strips values matching common patterns before recording tool arguments:
+### Span tree
 
-- API keys (`api_key: sk_live_...`)
-- Platform tokens (`ghp_`, `gho_`, `glpat_`, `xoxb-`, etc.)
-- JWTs (`eyJ...`)
-- Bearer tokens, passwords, credentials
+A typical trace looks like this:
+
+```text
+invoke_agent main
+  |- chat gpt-5.4
+  |- running 2 tools
+  |   |- execute_tool Read
+  |   `- execute_tool Shell
+  `- chat gpt-5.4
+```
+
+### Root span
+
+The root `invoke_agent <agent>` span stores:
+
+- conversation id and channel metadata when available
+- cumulative input, output, cache read, and cache write token counts
+- tool count and overall duration
+- reconstructed `pydantic_ai.all_messages`
+- `final_result` when a final assistant result can be extracted
+
+### Chat spans
+
+The plugin does not keep a single long-lived chat span open through the whole turn.
+Instead, it reconstructs one or more `chat <model>` spans from the final conversation shape emitted by `llm_output`.
+
+That means:
+
+- tool-call boundaries appear as separate chat phases
+- final assistant content is more accurate when OpenClaw emits `llm_output` after `lastAssistant` is fully assembled
+- if `lastAssistant` is incomplete, the plugin falls back to `assistantTexts`
+
+### Tool spans
+
+Each tool call becomes `execute_tool <tool>`.
+
+Depending on configuration, the span may include:
+
+- `gen_ai.tool.call.arguments`
+- `gen_ai.tool.call.result`
+- output size and timing metadata
+
+Tool calls from the same `runId` also produce a synthetic group span such as `running 1 tool` or `running 3 tools`.
+
+### Metrics
+
+When `enableMetrics` is `true`, the plugin exports:
+
+- `gen_ai.client.token.usage`
+- `gen_ai.client.operation.duration`
+
+## Configuration Reference
+
+All config lives under `plugins.entries.openclaw-logfire.config`.
+
+### Environment variable fallbacks
+
+| Variable | Used for | Notes |
+|---|---|---|
+| `LOGFIRE_TOKEN` | `token` | Required at runtime unless `token` is set directly |
+| `LOGFIRE_PROJECT_URL` | `projectUrl` | Optional |
+| `LOGFIRE_ENVIRONMENT` | `environment` | Defaults to `development` |
+| `LOGFIRE_PROVIDER_NAME` | `providerName` | Optional |
+
+### Active runtime options
+
+These options are parsed by the config resolver and currently affect runtime behavior.
+
+| Key | Type | Default | Description |
+|---|---|---:|---|
+| `token` | `string` | `""` | Logfire write token. Prefer `LOGFIRE_TOKEN` instead of committing it into config. |
+| `projectUrl` | `string` | `""` | Project URL used to build clickable trace links. |
+| `region` | `"us" \| "eu"` | `"us"` | Selects the OTLP base endpoint. |
+| `environment` | `string` | `"development"` | Deployment environment resource attribute. |
+| `serviceName` | `string` | `"openclaw-agent"` | OTEL `service.name`. |
+| `providerName` | `string` | `""` | Default provider name when OpenClaw metadata does not provide one. |
+| `providerNameMap` | `Record<string, string>` | `{}` | Maps OpenClaw provider ids to OTEL provider names. |
+| `captureToolInput` | `boolean` | `true` | Captures tool arguments. |
+| `captureToolOutput` | `boolean` | `false` | Captures tool results. |
+| `toolInputMaxLength` | `integer` | `2048` | Truncation limit for tool input capture. |
+| `toolOutputMaxLength` | `integer` | `512` | Truncation limit for tool output capture and chat output capture. |
+| `captureMessageContent` | `boolean` | `false` | Captures chat input, chat output, and system instructions. Privacy-sensitive. |
+| `captureHistoryMessages` | `boolean` | `false` | Helps reconstruct multi-turn conversation history on the root span. |
+| `historyMessagesMaxLength` | `integer` | `16384` | Truncation limit for serialized history messages. |
+| `redactSecrets` | `boolean` | `true` | Redacts common API keys, bearer tokens, JWTs, passwords, and similar secrets before capture. |
+| `distributedTracing.enabled` | `boolean` | `false` | Enables command-level trace propagation. |
+| `distributedTracing.injectIntoCommands` | `boolean` | `true` | Injects `traceparent` into matching HTTP commands. |
+| `distributedTracing.urlPatterns` | `string[]` | `["*"]` | URL glob patterns that are allowed for injection. |
+| `enableMetrics` | `boolean` | `true` | Enables OTLP metric export. |
+| `metricsIntervalMs` | `integer` | `60000` | Metric export interval in milliseconds. |
+| `enableTraceLinks` | `boolean` | `true` | Logs clickable project trace links when `projectUrl` is configured. |
+| `saveHookLogs` | `boolean` | `false` | Persists raw hook payloads to `~/.openclaw/logs/` for debugging. |
+| `resourceAttributes` | `Record<string, string>` | `{}` | Additional OTEL resource attributes. |
+| `spanProcessorType` | `"batch" \| "simple"` | `"batch"` | Use `simple` when debugging exporter behavior. |
+| `batchConfig.maxQueueSize` | `integer` | `2048` | Batch span processor queue size. |
+| `batchConfig.maxExportBatchSize` | `integer` | `512` | Maximum spans per export batch. |
+| `batchConfig.scheduledDelayMs` | `integer` | `5000` | Delay between batch exports. |
+
+### Accepted but currently reserved options
+
+These keys are accepted by the schema and config resolver, but they are not fully wired into runtime behavior in `1.0.0`.
+
+| Key | Current status |
+|---|---|
+| `captureStackTraces` | Reserved. Current runtime does not branch on this flag. |
+| `captureToolDefinitions` | Reserved. Accepted by schema, but not currently attached to spans. |
+| `distributedTracing.extractFromWebhooks` | Reserved. Current implementation focuses on outbound command injection. |
+| `logLevel` | Reserved. Accepted by config, but plugin logging does not currently change behavior from it. |
+| `useGenAiCompatibilityScope` | Legacy compatibility field kept in config code, not surfaced in plugin schema. |
+
+## Privacy And Safety Notes
+
+- `captureMessageContent: true` is the highest-impact privacy switch.
+- `captureToolOutput: true` can capture large or sensitive tool results.
+- `redactSecrets: true` helps, but it is best-effort rather than a formal DLP guarantee.
+- `saveHookLogs: true` writes raw payloads to local disk. Turn it off after debugging.
+- Prefer `LOGFIRE_TOKEN` in the shell environment instead of committing tokens into `openclaw.json`.
 
 ## Distributed Tracing
 
-Connect OpenClaw traces to your backend services. When enabled, the plugin injects `traceparent` headers into HTTP calls made by exec/Bash tools.
+When enabled, the plugin injects W3C `traceparent` into matching command parameters before the tool runs.
 
 ```jsonc
 {
-  "distributedTracing": {
-    "enabled": true,
-    "injectIntoCommands": true,      // Add traceparent to curl/wget/httpie
-    "extractFromWebhooks": true,     // Extract traceparent from inbound webhooks
-    "urlPatterns": [                 // Only inject for matching URLs
-      "https://api.mycompany.com/*",
-      "http://localhost:8000/*"
-    ]
+  "plugins": {
+    "entries": {
+      "openclaw-logfire": {
+        "enabled": true,
+        "config": {
+          "distributedTracing": {
+            "enabled": true,
+            "injectIntoCommands": true,
+            "urlPatterns": [
+              "https://api.example.com/*",
+              "http://localhost:8000/*"
+            ]
+          }
+        }
+      }
+    }
   }
 }
 ```
 
-This produces connected traces across services:
+Current scope:
 
+- works for outbound command injection only
+- targets HTTP-like commands such as `curl`, `wget`, `http`, and `httpie`
+- respects `distributedTracing.urlPatterns`
+
+## Troubleshooting
+
+### No traces appear
+
+Check these first:
+
+1. `LOGFIRE_TOKEN` is set in the environment seen by OpenClaw.
+2. The plugin entry key is exactly `openclaw-logfire`.
+3. OpenClaw is at least `2026.2.1`.
+4. OpenClaw was restarted after config changes.
+5. Your machine can reach the selected Logfire region endpoint.
+
+### Agent spans exist, but chat spans are incomplete
+
+Make sure OpenClaw emits `llm_output` after the final `lastAssistant` object is fully assembled. The plugin reconstructs chat phases from the completed assistant payload.
+
+### Tool spans do not show failures clearly
+
+Current OpenClaw hook payloads do not always expose tool-level error details at `tool_result_persist`, so failures may be reflected on the root agent span rather than the individual tool span.
+
+### I need raw hook payloads
+
+Temporarily set:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "openclaw-logfire": {
+        "enabled": true,
+        "config": {
+          "saveHookLogs": true
+        }
+      }
+    }
+  }
+}
 ```
-OpenClaw: invoke_agent my-agent
-  |-- execute_tool exec (curl POST /api/data)
-       |-- [Your Backend] POST /api/data
-            |-- database query
-            |-- downstream service call
-```
 
-Your backend must support W3C trace context extraction (most frameworks do: FastAPI with Logfire, Express with OTEL, etc.).
+This writes hook payloads to `~/.openclaw/logs/`.
 
-## Architecture
-
-```
-openclaw-logfire/src/
-  index.ts              Plugin entry point + hook wiring
-  config.ts             Typed configuration with defaults
-  otel.ts               OTEL SDK initialization (Logfire OTLP)
-  hooks/
-    before-agent-start  invoke_agent span creation
-    llm-input           gen_ai.chat span creation (per LLM call)
-    llm-output          LLM span close + token metrics + accumulation
-    before-tool-call    execute_tool span + context propagation
-    tool-result-persist Tool span close + result capture
-    agent-end           Span close + cumulative tokens + metrics
-    message-received    Channel attribution + inbound context
-  context/
-    span-store          Session -> active spans (LIFO tool stack, LLM spans)
-    propagation         W3C traceparent inject/extract
-  metrics/
-    genai-metrics       Token usage + operation duration histograms
-  events/
-    inference-details   Opt-in inference operation event
-```
-
-### OpenClaw Hooks Used
-
-| Hook | Purpose |
-|------|---------|
-| `before_agent_start` | Create root `invoke_agent` span |
-| `llm_input` | Create `gen_ai.chat` child span per LLM call |
-| `llm_output` | Close LLM span, record token usage metrics |
-| `before_tool_call` | Create `execute_tool` child span |
-| `tool_result_persist` | Close tool span, record result size |
-| `agent_end` | Close spans, set cumulative tokens, emit metrics |
-| `message_received` | Enrich with channel info |
-
-Requires OpenClaw >= 2026.2.1 (`before_tool_call` and `llm_input`/`llm_output` hooks).
-
-## Development
+## Local Development
 
 ```bash
-git clone https://github.com/Ultrathink-Solutions/openclaw-logfire
+git clone https://github.com/chenbaiyujason/openclaw-logfire
 cd openclaw-logfire
 npm install
+npm run build
 npm run typecheck
 npm test
 ```
 
-### Local testing with OpenClaw
+To load the local checkout in OpenClaw, either symlink it into your extensions directory or add the repo path to `plugins.load.paths`.
 
 ```bash
-# Symlink into OpenClaw extensions
-ln -s $(pwd) ~/.openclaw/extensions/openclaw-logfire
-
-# Or add to openclaw.json
-# "plugins": { "load": { "paths": ["./path/to/openclaw-logfire"] } }
-
-export LOGFIRE_TOKEN="your-write-token"
-openclaw restart
-openclaw plugins list  # Should show "openclaw-logfire" as enabled
+ln -s "$(pwd)" ~/.openclaw/extensions/openclaw-logfire
 ```
 
-## Built By
+Or:
 
-[Ultrathink Solutions](https://ultrathinksolutions.com) — production-grade AI agent infrastructure. We help teams close the gap between AI demos and production systems.
+```json
+{
+  "plugins": {
+    "load": {
+      "paths": [
+        "/absolute/path/to/openclaw-logfire"
+      ]
+    }
+  }
+}
+```
 
-- [We Put OpenClaw Into Production in a Weekend](https://ultrathinksolutions.com/the-signal/openclaw-to-production/) — the architecture behind this plugin
-- [The AI Execution Gap](https://ultrathinksolutions.com/the-signal/ai-execution-gap/) — why most AI projects stall between POC and production
+Then export `LOGFIRE_TOKEN`, restart OpenClaw, and verify with:
+
+```bash
+openclaw plugins list
+```
 
 ## License
 

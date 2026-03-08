@@ -7,6 +7,15 @@ import {
   extractWorkspaceName,
   generateCallId,
   extractErrorDetails,
+  normalizeToGenAiInputMessages,
+  normalizeToGenAiOutputMessages,
+  buildFullInputMessages,
+  buildSystemInstructions,
+  buildPydanticAiAllMessages,
+  buildAssistantMessagesFromTexts,
+  buildMessagesFromConversationHistory,
+  extractConversationOutputMessages,
+  extractFinalResult,
 } from './util.js';
 
 describe('safeJsonStringify', () => {
@@ -107,6 +116,321 @@ describe('generateCallId', () => {
     const id = generateCallId();
     expect(typeof id).toBe('string');
     expect(id).toMatch(/.+-[a-z0-9]+/);
+  });
+});
+
+describe('normalizeToGenAiOutputMessages', () => {
+  it('converts string content to single text part', () => {
+    const out = normalizeToGenAiOutputMessages({ role: 'assistant', content: 'Hello' });
+    expect(out).toHaveLength(1);
+    expect(out[0].role).toBe('assistant');
+    expect(out[0].parts).toEqual([{ type: 'text', content: 'Hello' }]);
+  });
+
+  it('includes finish_reason when provided', () => {
+    const out = normalizeToGenAiOutputMessages(
+      { role: 'assistant', content: 'Done' },
+      'stop',
+    );
+    expect(out[0].finish_reason).toBe('stop');
+  });
+
+  it('converts content array with text and tool_use to parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Call foo' },
+        { type: 'tool_use', id: 'call-1', name: 'foo', arguments: { x: 1 } },
+      ],
+    });
+    expect(out[0].parts).toHaveLength(2);
+    expect(out[0].parts[0]).toEqual({ type: 'text', content: 'Call foo' });
+    expect(out[0].parts[1]).toMatchObject({
+      type: 'tool_call',
+      id: 'call-1',
+      name: 'foo',
+      arguments: { x: 1 },
+    });
+  });
+
+  it('splits OpenClaw thinking block and <final> text block', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'step 1\nstep 2' },
+        { type: 'text', text: '<final>\n你好呀\n</final>' },
+      ],
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: 'step 1\nstep 2' },
+      { type: 'text', content: '你好呀' },
+    ]);
+  });
+
+  it('splits <think> and <final> from a single text block', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text: '<think>\n先分析\n</think>\n<final>\n再输出\n</final>',
+        },
+      ],
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: '先分析' },
+      { type: 'text', content: '再输出' },
+    ]);
+  });
+
+  it('converts camelCase toolCall blocks to tool_call parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        {
+          type: 'toolCall',
+          id: 'call-2',
+          name: 'load_skills',
+          arguments: { skills: ['shot_generation'] },
+        },
+      ],
+    });
+    expect(out[0].parts).toEqual([
+      {
+        type: 'tool_call',
+        id: 'call-2',
+        name: 'load_skills',
+        arguments: { skills: ['shot_generation'] },
+      },
+    ]);
+  });
+
+  it('parses newline-delimited JSON string content from OpenClaw snapshots', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content:
+        '{"type":"thinking","thinking":"先读文件"}\n' +
+        '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
+        '{"type":"text","text":"<final>你好呀</final>"}',
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: '先读文件' },
+      {
+        type: 'tool_call',
+        id: 'read1',
+        name: 'read',
+        arguments: { file_path: '/tmp/a' },
+      },
+      { type: 'text', content: '你好呀' },
+    ]);
+  });
+
+  it('returns empty array for null/undefined', () => {
+    expect(normalizeToGenAiOutputMessages(null)).toEqual([]);
+    expect(normalizeToGenAiOutputMessages(undefined)).toEqual([]);
+  });
+});
+
+describe('normalizeToGenAiInputMessages', () => {
+  it('parses OpenClaw assistant history string with jsonl and final tags', () => {
+    const out = normalizeToGenAiInputMessages([
+      {
+        role: 'assistant',
+        content:
+          '{"type":"thinking","thinking":"先看上下文"}\n' +
+          '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
+          '<final>你好呀</final>',
+      },
+    ]);
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: '先看上下文' },
+      {
+        type: 'tool_call',
+        id: 'read1',
+        name: 'read',
+        arguments: { file_path: '/tmp/a' },
+      },
+      { type: 'text', content: '你好呀' },
+    ]);
+  });
+});
+
+describe('buildFullInputMessages', () => {
+  it('builds system and user messages when system prompt exists', () => {
+    const out = buildFullInputMessages('You are helpful', undefined, 'Hello');
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual({
+      role: 'system',
+      parts: [{ type: 'text', content: 'You are helpful' }],
+    });
+    expect(out[1]).toEqual({ role: 'user', parts: [{ type: 'text', content: 'Hello' }] });
+  });
+
+  it('omits system when empty', () => {
+    const out = buildFullInputMessages('', [], 'Hi');
+    expect(out).toHaveLength(1);
+    expect(out[0].role).toBe('user');
+    expect(out[0].parts[0].content).toBe('Hi');
+  });
+
+  it('includes normalized history between system and current user', () => {
+    const out = buildFullInputMessages(undefined, [
+      { role: 'user', content: 'First' },
+      { role: 'assistant', content: 'Reply' },
+    ], 'Second');
+    expect(out).toHaveLength(3);
+    expect(out[0].role).toBe('user');
+    expect(out[0].parts[0].content).toBe('First');
+    expect(out[1].role).toBe('assistant');
+    expect(out[1].parts[0].content).toBe('Reply');
+    expect(out[2].role).toBe('user');
+    expect(out[2].parts[0].content).toBe('Second');
+  });
+});
+
+describe('buildSystemInstructions', () => {
+  it('returns a text instruction part when prompt exists', () => {
+    expect(buildSystemInstructions(' You are helpful ')).toEqual([
+      { type: 'text', content: 'You are helpful' },
+    ]);
+  });
+
+  it('returns empty array when prompt is blank', () => {
+    expect(buildSystemInstructions('   ')).toEqual([]);
+    expect(buildSystemInstructions(undefined)).toEqual([]);
+  });
+});
+
+describe('buildPydanticAiAllMessages', () => {
+  it('concatenates base and assistant messages', () => {
+    const out = buildPydanticAiAllMessages(
+      [{ role: 'user', parts: [{ type: 'text', content: 'Hi' }] }],
+      [{ role: 'assistant', parts: [{ type: 'text', content: 'Hello' }] }],
+    );
+    expect(out).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Hi' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'Hello' }] },
+    ]);
+  });
+
+  it('handles missing base messages gracefully', () => {
+    const out = buildPydanticAiAllMessages(undefined, [
+      { role: 'assistant', parts: [{ type: 'text', content: 'Hello' }] },
+    ]);
+    expect(out).toEqual([
+      { role: 'assistant', parts: [{ type: 'text', content: 'Hello' }] },
+    ]);
+  });
+});
+
+describe('buildMessagesFromConversationHistory', () => {
+  it('keeps tool responses as user messages for pydantic-ai style rendering', () => {
+    expect(
+      buildMessagesFromConversationHistory([
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { path: '/tmp/a' } }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'write',
+          content: [{ type: 'text', text: 'ok' }],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: { path: '/tmp/a' } }],
+      },
+      {
+        role: 'user',
+        parts: [{ type: 'tool_call_response', id: 'call-1', name: 'write', result: 'ok' }],
+      },
+    ]);
+  });
+
+  it('keeps tool response names and plain-text results for text blocks', () => {
+    expect(
+      buildMessagesFromConversationHistory([
+        {
+          role: 'toolResult',
+          toolCallId: 'call-2',
+          toolName: 'load_skills',
+          content: [{ type: 'text', text: '已加载技能' }],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            type: 'tool_call_response',
+            id: 'call-2',
+            name: 'load_skills',
+            result: '已加载技能',
+          },
+        ],
+      },
+    ]);
+  });
+});
+
+describe('extractConversationOutputMessages', () => {
+  it('extracts only messages produced after current input', () => {
+    const fullConversation = [
+      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
+      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+    ];
+    const inputMessages = [
+      { role: 'system', parts: [{ type: 'text', content: 'System' }] },
+      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+    ];
+
+    expect(extractConversationOutputMessages(fullConversation, inputMessages)).toEqual([
+      { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
+      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+    ]);
+  });
+});
+
+describe('buildAssistantMessagesFromTexts', () => {
+  it('builds a fallback assistant message from assistantTexts', () => {
+    expect(buildAssistantMessagesFromTexts(['第一段', '第二段'], 'stop')).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: '第一段\n第二段' }],
+        finish_reason: 'stop',
+      },
+    ]);
+  });
+
+  it('returns empty array when assistantTexts is empty', () => {
+    expect(buildAssistantMessagesFromTexts([], 'stop')).toEqual([]);
+    expect(buildAssistantMessagesFromTexts(undefined, 'stop')).toEqual([]);
+  });
+});
+
+describe('extractFinalResult', () => {
+  it('returns the last assistant text content', () => {
+    const out = extractFinalResult([
+      { role: 'user', parts: [{ type: 'text', content: 'Hi' }] },
+      { role: 'assistant', parts: [{ type: 'thinking', content: 'step' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'Hello there' }] },
+    ]);
+    expect(out).toBe('Hello there');
+  });
+
+  it('returns undefined when assistant has no text part', () => {
+    const out = extractFinalResult([
+      { role: 'assistant', parts: [{ type: 'thinking', content: 'step' }] },
+    ]);
+    expect(out).toBeUndefined();
   });
 });
 

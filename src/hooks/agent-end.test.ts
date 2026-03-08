@@ -39,12 +39,17 @@ function seedSession(
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: overrides?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: overrides?.toolSequence ?? 0,
     hasError: overrides?.hasError ?? false,
     startTime: Date.now() - 5000, // 5 seconds ago
     model: overrides?.model,
     provider: overrides?.provider,
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: [],
   });
 
   return agentSpan;
@@ -54,11 +59,13 @@ describe('handleAgentEnd', () => {
   const logger = createMockLogger();
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     spanStore.delete('sess-1');
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     spanStore.delete('sess-1');
   });
 
@@ -139,7 +146,7 @@ describe('handleAgentEnd', () => {
     handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
 
     const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasInputTokens = calls.some(([key]: [string]) => key === 'gen_ai.usage.input_tokens');
+    const hasInputTokens = calls.some((call) => call[0] === 'gen_ai.usage.input_tokens');
     expect(hasInputTokens).toBe(false);
   });
 
@@ -151,7 +158,7 @@ describe('handleAgentEnd', () => {
     handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
 
     const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasCacheRead = calls.some(([key]: [string]) => key === 'openclaw.usage.cache_read_tokens');
+    const hasCacheRead = calls.some((call) => call[0] === 'openclaw.usage.cache_read_tokens');
     expect(hasCacheRead).toBe(false);
   });
 
@@ -167,6 +174,78 @@ describe('handleAgentEnd', () => {
     expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.request.model', 'claude-sonnet-4-5-20250929');
     expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.response.model', 'claude-sonnet-4-5-20250929');
     expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.provider.name', 'anthropic');
+  });
+
+  it('writes pydantic_ai.all_messages and final_result on root span', () => {
+    const agentSpan = seedSession('sess-1', {
+      model: 'claude-sonnet-4-5-20250929',
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('session should exist');
+    session.latestAllMessages = [
+      { role: 'user', parts: [{ type: 'text', content: 'Hello' }] },
+      {
+        role: 'assistant',
+        parts: [
+          { type: 'thinking', content: 'step 1' },
+          { type: 'text', content: 'Final answer' },
+        ],
+        finish_reason: 'stop',
+      },
+    ];
+    session.latestSystemInstructions = [{ type: 'text', content: 'System prompt' }];
+
+    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
+
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+      'pydantic_ai.all_messages',
+      expect.stringContaining('"Final answer"'),
+    );
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+      'final_result',
+      'Final answer',
+    );
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+      'gen_ai.system_instructions',
+      expect.stringContaining('"System prompt"'),
+    );
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+      'logfire.json_schema',
+      expect.stringContaining('"pydantic_ai.all_messages"'),
+    );
+  });
+
+  it('rebuilds all_messages from agent_end messages when session cache is stale', () => {
+    const agentSpan = seedSession('sess-1');
+    const event: AgentEndEvent = {
+      success: true,
+      messages: [
+        { role: 'user', content: '请帮我写入' },
+        {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } }],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-1',
+          toolName: 'write',
+          content: [{ type: 'text', text: '写入成功' }],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: '<final>已经写好啦</final>' }],
+        },
+      ],
+    };
+
+    handleAgentEnd(event, baseCtx, createTestConfig(), logger);
+
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+      'pydantic_ai.all_messages',
+      expect.stringContaining('"tool_call_response"'),
+    );
+    expect(agentSpan.setAttribute).toHaveBeenCalledWith('final_result', '已经写好啦');
   });
 
   it('sets duration and tool count attributes', () => {
@@ -195,21 +274,45 @@ describe('handleAgentEnd', () => {
     expect(orphanedToolSpan.end).toHaveBeenCalled();
   });
 
-  it('closes remaining LLM spans', () => {
+  it('keeps agent open until watchdog when LLM spans still pending', () => {
     seedSession('sess-1');
-    const orphanedLlmSpan = mockSpan();
     spanStore.setLlmSpan('sess-1', 'run-orphan', {
-      span: orphanedLlmSpan,
-      ctx: mockContext(),
       runId: 'run-orphan',
+      agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now(),
+      inputMessages: [],
+      systemInstructions: [],
     });
 
     handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
 
-    expect(orphanedLlmSpan.end).toHaveBeenCalled();
+    expect(spanStore.get('sess-1')?.deferredAgentEnd).toBeDefined();
+    vi.runAllTimers();
+    expect(spanStore.get('sess-1')).toBeUndefined();
+  });
+
+  it('defers finalization until pending llm_output is cleared', () => {
+    const agentSpan = seedSession('sess-1');
+    spanStore.setLlmSpan('sess-1', 'run-pending', {
+      runId: 'run-pending',
+      agentName: 'my-agent',
+      provider: 'google',
+      model: 'gemini-3.1-flash-lite-preview',
+      startTime: Date.now(),
+      inputMessages: [],
+      systemInstructions: [],
+    });
+
+    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
+
+    expect(agentSpan.end).not.toHaveBeenCalled();
+
+    spanStore.deleteLlmSpan('sess-1', 'run-pending');
+    vi.runAllTimers();
+
+    expect(agentSpan.end).toHaveBeenCalled();
   });
 
   it('records operation duration metrics when enabled', () => {

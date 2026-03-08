@@ -1,27 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanKind } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
 import { handleLlmInput } from './llm-input.js';
 import type { LlmInputEvent, LlmContext } from './llm-input.js';
 
-const { mockLlmSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
-  const span = {
-    end: vi.fn(),
-    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
-    setAttribute: vi.fn().mockReturnThis(),
-    setStatus: vi.fn().mockReturnThis(),
-    addEvent: vi.fn().mockReturnThis(),
-    addLink: vi.fn().mockReturnThis(),
-    recordException: vi.fn().mockReturnThis(),
-    isRecording: vi.fn(() => true),
-    updateName: vi.fn().mockReturnThis(),
-    setAttributes: vi.fn().mockReturnThis(),
-  };
+const { mockTracerInstance } = vi.hoisted(() => {
   return {
-    mockLlmSpan: span,
-    mockTracerInstance: { startSpan: vi.fn(() => span) },
-    mockSetSpan: vi.fn(() => ({})),
+    mockTracerInstance: { startSpan: vi.fn() },
   };
 });
 
@@ -31,9 +16,7 @@ vi.mock('@opentelemetry/api', async () => {
     ...actual,
     trace: {
       getTracer: vi.fn(() => mockTracerInstance),
-      setSpan: mockSetSpan,
     },
-    SpanKind: actual.SpanKind,
   };
 });
 
@@ -44,10 +27,15 @@ function seedSession(sessionKey: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
     startTime: Date.now(),
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: [],
   });
   return agentSpan;
 }
@@ -64,7 +52,6 @@ describe('handleLlmInput', () => {
 
   const baseEvent: LlmInputEvent = {
     runId: 'run-abc',
-    sessionId: 'sess-1',
     provider: 'anthropic',
     model: 'claude-sonnet-4-5-20250929',
     prompt: 'Hello',
@@ -77,38 +64,42 @@ describe('handleLlmInput', () => {
     sessionKey: 'sess-1',
   };
 
-  it('creates a gen_ai.chat span with correct attributes', () => {
+  it('stores phase reconstruction metadata instead of creating a chat span immediately', () => {
     seedSession('sess-1');
 
     handleLlmInput(baseEvent, baseCtx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
-      'gen_ai.chat anthropic',
-      expect.objectContaining({
-        kind: SpanKind.INTERNAL,
-        attributes: expect.objectContaining({
-          'gen_ai.operation.name': 'chat',
-          'gen_ai.request.model': 'claude-sonnet-4-5-20250929',
-          'gen_ai.provider.name': 'anthropic',
-          'openclaw.llm.run_id': 'run-abc',
-          'openclaw.llm.images_count': 0,
-        }),
-      }),
-      expect.anything(), // parent context
-    );
+    expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')).toMatchObject({
+      runId: 'run-abc',
+      agentName: 'my-agent',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5-20250929',
+    });
   });
 
-  it('stores the LLM span in the session', () => {
+  it('stores the LLM metadata in the session', () => {
     seedSession('sess-1');
 
-    handleLlmInput(baseEvent, baseCtx, createTestConfig());
+    handleLlmInput(
+      { ...baseEvent, systemPrompt: 'You are helpful' },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
 
     const llmEntry = spanStore.getLlmSpan('sess-1', 'run-abc');
     expect(llmEntry).toBeDefined();
-    expect(llmEntry!.span).toBe(mockLlmSpan);
     expect(llmEntry!.runId).toBe('run-abc');
+    expect(llmEntry!.agentName).toBe('my-agent');
     expect(llmEntry!.provider).toBe('anthropic');
     expect(llmEntry!.model).toBe('claude-sonnet-4-5-20250929');
+    expect(llmEntry!.inputMessages).toEqual([
+      { role: 'system', parts: [{ type: 'text', content: 'You are helpful' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'Hello' }] },
+    ]);
+    expect(llmEntry!.systemInstructions).toEqual([
+      { type: 'text', content: 'You are helpful' },
+    ]);
   });
 
   it('updates session model and provider', () => {
@@ -145,33 +136,75 @@ describe('handleLlmInput', () => {
     );
   });
 
-  it('captures message content when enabled', () => {
+  it('captures message content into stored phase metadata when enabled', () => {
     seedSession('sess-1');
     const config = createTestConfig({ captureMessageContent: true });
     const event = { ...baseEvent, systemPrompt: 'You are helpful' };
 
     handleLlmInput(event, baseCtx, config);
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        attributes: expect.objectContaining({
-          'gen_ai.system': 'You are helpful',
-          'gen_ai.prompt': 'Hello',
-        }),
-      }),
-      expect.anything(),
-    );
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')).toMatchObject({
+      inputMessages: [
+        { role: 'system', parts: [{ type: 'text', content: 'You are helpful' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'Hello' }] },
+      ],
+      systemInstructions: [{ type: 'text', content: 'You are helpful' }],
+    });
   });
 
-  it('does not capture message content by default', () => {
+  it('stores the fully expanded input message list when content capture is enabled', () => {
+    seedSession('sess-1');
+    const config = createTestConfig({ captureMessageContent: true });
+    const event = { ...baseEvent, systemPrompt: 'System', prompt: 'User turn' };
+
+    handleLlmInput(event, baseCtx, config);
+
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
+      { role: 'system', parts: [{ type: 'text', content: 'System' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'User turn' }] },
+    ]);
+    expect(spanStore.get('sess-1')?.latestAllMessages).toEqual([
+      { role: 'system', parts: [{ type: 'text', content: 'System' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'User turn' }] },
+    ]);
+  });
+
+  it('does not create any transient chat span during llm_input', () => {
+    seedSession('sess-1');
+    const config = createTestConfig({ captureMessageContent: true });
+    const event = { ...baseEvent, systemPrompt: 'System', prompt: 'User turn' };
+
+    handleLlmInput(event, baseCtx, config);
+
+    expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
+  });
+
+  it('falls back to initial session history when llm_input payload omits historyMessages', () => {
+    seedSession('sess-1');
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    session.initialHistoryMessages = [
+      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+    ];
+
+    handleLlmInput(
+      { ...baseEvent, historyMessages: undefined, prompt: '当前问题' },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+    ]);
+  });
+
+  it('does not capture message history by default', () => {
     seedSession('sess-1');
 
     handleLlmInput(baseEvent, baseCtx, createTestConfig());
 
-    const attrs = mockTracerInstance.startSpan.mock.calls[0][1].attributes;
-    expect(attrs).not.toHaveProperty('gen_ai.system');
-    expect(attrs).not.toHaveProperty('gen_ai.prompt');
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([]);
   });
 
   it('falls back to sessionId when sessionKey is missing', () => {

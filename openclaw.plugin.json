@@ -33,6 +33,12 @@
         "type": "string",
         "description": "GenAI provider name (e.g. 'anthropic', 'openai')."
       },
+      "providerNameMap": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "default": {},
+        "description": "Map OpenClaw provider id to OTel name, e.g. {\"gmn\": \"openai\"}."
+      },
       "captureToolInput": {
         "type": "boolean",
         "default": true,
@@ -61,17 +67,22 @@
       "captureMessageContent": {
         "type": "boolean",
         "default": false,
-        "description": "Record message text (privacy-sensitive)."
+        "description": "Record message text for chat spans and root pydantic_ai.all_messages (privacy-sensitive)."
+      },
+      "captureHistoryMessages": {
+        "type": "boolean",
+        "default": false,
+        "description": "Record multi-turn history so chat spans and root pydantic_ai.all_messages can be reconstructed."
+      },
+      "historyMessagesMaxLength": {
+        "type": "integer",
+        "default": 16384,
+        "description": "Max character length for serialized message arrays stored on spans."
       },
       "captureToolDefinitions": {
         "type": "boolean",
         "default": false,
-        "description": "Record tool schemas in inference events."
-      },
-      "captureInferenceEvents": {
-        "type": "boolean",
-        "default": false,
-        "description": "Emit gen_ai.client.inference.operation.details events."
+        "description": "Best-effort capture of tool schemas on chat spans when the current hook payload can provide them."
       },
       "redactSecrets": {
         "type": "boolean",
@@ -119,6 +130,11 @@
         "type": "boolean",
         "default": true,
         "description": "Log clickable Logfire trace URLs."
+      },
+      "saveHookLogs": {
+        "type": "boolean",
+        "default": false,
+        "description": "Persist raw OpenClaw hook payloads to ~/.openclaw/logs for offline debugging."
       },
       "logLevel": {
         "type": "string",

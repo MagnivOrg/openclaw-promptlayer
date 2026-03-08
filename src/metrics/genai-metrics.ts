@@ -10,7 +10,7 @@
 
 import { metrics } from '@opentelemetry/api';
 
-const meter = metrics.getMeter('@ultrathink-solutions/openclaw-logfire', '0.3.0');
+const meter = metrics.getMeter('@shichen335/openclaw-logfire', '1.0.0');
 
 /** Spec bucket boundaries for token usage. */
 const TOKEN_BUCKETS = [

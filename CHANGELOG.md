@@ -1,9 +1,17 @@
 # Changelog
 
-All notable changes to `@ultrathink-solutions/openclaw-logfire` will be documented in this file.
+All notable changes to `@shichen335/openclaw-logfire` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-03-09
+
+### Changed
+
+- Released the plugin as `@shichen335/openclaw-logfire` for npm distribution under the forked repository
+- Updated package metadata, docs, and published runtime version strings to `1.0.0`
+- Kept the plugin id as `openclaw-logfire` so existing OpenClaw config keys continue to work
 
 ## [0.3.0] - 2026-02-16
 
@@ -91,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Batch and simple span processor modes
 - Zero-config quickstart (just set `LOGFIRE_TOKEN`)
 
+[1.0.0]: https://github.com/chenbaiyujason/openclaw-logfire/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/Ultrathink-Solutions/openclaw-logfire/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Ultrathink-Solutions/openclaw-logfire/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Ultrathink-Solutions/openclaw-logfire/compare/v0.1.1...v0.1.2

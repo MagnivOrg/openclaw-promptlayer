@@ -9,7 +9,11 @@
 
 import { trace, context, SpanKind } from '@opentelemetry/api';
 import { spanStore, type SessionSpanContext } from '../context/span-store.js';
-import { extractWorkspaceName } from '../util.js';
+import {
+  extractWorkspaceName,
+  LOGFIRE_PYDANTIC_AI_SCOPE_NAME,
+  normalizeToGenAiInputMessages,
+} from '../util.js';
 import type { LogfirePluginConfig } from '../config.js';
 
 /** OpenClaw before_agent_start event payload. */
@@ -28,14 +32,15 @@ export interface AgentContext {
 }
 
 export function handleBeforeAgentStart(
-  _event: BeforeAgentStartEvent,
+  event: BeforeAgentStartEvent,
   ctx: AgentContext,
   config: LogfirePluginConfig,
 ): void {
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
 
-  const tracer = trace.getTracer('@ultrathink-solutions/openclaw-logfire', '0.3.0');
+  // 使用 pydantic-ai scope，让 Logfire 更稳定地走已验证过的渲染路径。
+  const tracer = trace.getTracer(LOGFIRE_PYDANTIC_AI_SCOPE_NAME, '1.0.0');
   const agentName = ctx.agentId || 'agent';
   const workspace = extractWorkspaceName(ctx.workspaceDir);
 
@@ -55,6 +60,9 @@ export function handleBeforeAgentStart(
         'gen_ai.agent.name': agentName,
         'gen_ai.agent.id': agentName,
         'gen_ai.conversation.id': sessionKey,
+        agent_name: agentName,
+        'logfire.msg': 'agent run',
+        'logfire.span_type': 'span',
 
         // OpenClaw-specific context
         'openclaw.session_key': sessionKey,
@@ -72,10 +80,17 @@ export function handleBeforeAgentStart(
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+    completedToolCalls: [],
+    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
     startTime: Date.now(),
+    latestAllMessages: [],
+    latestSystemInstructions: [],
+    initialHistoryMessages: Array.isArray(event.messages)
+      ? normalizeToGenAiInputMessages(event.messages)
+      : [],
   };
 
   spanStore.set(sessionKey, session);

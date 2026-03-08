@@ -23,6 +23,7 @@ describe('resolveConfig', () => {
     expect(config.redactSecrets).toBe(true);
     expect(config.distributedTracing.enabled).toBe(false);
     expect(config.enableMetrics).toBe(true);
+    expect(config.saveHookLogs).toBe(false);
     expect(config.spanProcessorType).toBe('batch');
   });
 
@@ -82,6 +83,13 @@ describe('resolveConfig', () => {
     expect(config.batchConfig.maxQueueSize).toBe(4096);
     expect(config.batchConfig.maxExportBatchSize).toBe(512);
     expect(config.batchConfig.scheduledDelayMs).toBe(5000);
+  });
+
+  it('accepts saveHookLogs when explicitly enabled', () => {
+    const config = resolveConfig({
+      saveHookLogs: true,
+    });
+    expect(config.saveHookLogs).toBe(true);
   });
 
   it('accepts resourceAttributes as string record', () => {

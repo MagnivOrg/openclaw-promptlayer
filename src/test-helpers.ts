@@ -51,14 +51,16 @@ export function createTestConfig(
     environment: 'test',
     serviceName: 'openclaw-agent',
     providerName: '',
+    providerNameMap: {},
     captureToolInput: false,
     captureToolOutput: false,
     toolInputMaxLength: 2048,
     toolOutputMaxLength: 512,
     captureStackTraces: true,
     captureMessageContent: false,
+    captureHistoryMessages: false,
+    historyMessagesMaxLength: 16384,
     captureToolDefinitions: false,
-    captureInferenceEvents: false,
     redactSecrets: true,
     distributedTracing: {
       enabled: false,
@@ -77,6 +79,7 @@ export function createTestConfig(
       maxExportBatchSize: 512,
       scheduledDelayMs: 5000,
     },
+    useGenAiCompatibilityScope: true,
     ...overrides,
   };
 }

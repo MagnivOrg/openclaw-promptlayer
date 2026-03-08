@@ -7,9 +7,13 @@
  * model/provider on the session for later use in metrics.
  */
 
-import { trace, SpanKind } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
-import { prepareForCapture } from '../util.js';
+import {
+  prepareForCapture,
+  buildFullInputMessages,
+  buildSystemInstructions,
+  resolveProviderName,
+} from '../util.js';
 import type { LogfirePluginConfig } from '../config.js';
 
 /** OpenClaw llm_input event payload (minimal — only fields we use). */
@@ -19,6 +23,8 @@ export interface LlmInputEvent {
   model: string;
   systemPrompt?: string;
   prompt: string;
+  /** Full message list before this prompt (OpenClaw sends historyMessages). */
+  historyMessages?: unknown[];
   imagesCount: number;
 }
 
@@ -42,56 +48,71 @@ export function handleLlmInput(
   const session = spanStore.get(sessionKey);
   if (!session) return;
 
-  // Store model/provider for use in agent_end metrics
+  const resolvedProvider =
+    resolveProviderName(event.provider, config.providerNameMap) ||
+    event.provider ||
+    config.providerName ||
+    'unknown';
+
   session.model = event.model;
-  session.provider = event.provider;
-
-  // Update the provider on the agent span if it was unknown at start
-  if (event.provider && config.providerName === '') {
-    session.agentSpan.setAttribute('gen_ai.provider.name', event.provider);
-  }
-
-  const tracer = trace.getTracer('@ultrathink-solutions/openclaw-logfire', '0.3.0');
-
-  const attributes: Record<string, string | number> = {
-    'gen_ai.operation.name': 'chat',
-    'gen_ai.agent.name': ctx.agentId || 'agent',
-    'gen_ai.request.model': event.model,
-    'gen_ai.provider.name': event.provider,
-    'openclaw.llm.run_id': event.runId,
-    'openclaw.llm.images_count': event.imagesCount,
-  };
-
-  // Opt-in: capture prompt content (with redaction + truncation)
-  if (config.captureMessageContent) {
-    if (event.systemPrompt) {
-      attributes['gen_ai.system'] = prepareForCapture(
-        event.systemPrompt,
-        config.toolInputMaxLength,
-        config.redactSecrets,
-      );
-    }
-    attributes['gen_ai.prompt'] = prepareForCapture(
-      event.prompt,
-      config.toolInputMaxLength,
-      config.redactSecrets,
-    );
-  }
-
-  const span = tracer.startSpan(
-    `gen_ai.chat ${event.provider}`,
-    { kind: SpanKind.INTERNAL, attributes },
-    session.agentCtx,
+  session.provider = resolvedProvider;
+  // 保存最后一次 LLM 调用的 runId 与输入摘要，供 agent 出错时日志使用
+  session.lastLlmRunId = event.runId;
+  session.lastLlmPrompt = prepareForCapture(
+    event.prompt,
+    600,
+    config.redactSecrets,
   );
 
-  const spanCtx = trace.setSpan(session.agentCtx, span);
+  if (resolvedProvider && config.providerName === '') {
+    session.agentSpan.setAttribute('gen_ai.provider.name', resolvedProvider);
+  }
+
+  const systemInstructions = buildSystemInstructions(event.systemPrompt);
+  const hasRawHistoryMessages =
+    Array.isArray(event.historyMessages) && event.historyMessages.length > 0;
+
+  // 完整 gen_ai.input.messages（system + 历史 + 当前用户轮）供 Logfire 正确解析多轮/工具/思考
+  let fullInput: ReturnType<typeof buildFullInputMessages> = [];
+  if (config.captureMessageContent || config.captureHistoryMessages) {
+    if (hasRawHistoryMessages) {
+      fullInput = buildFullInputMessages(
+        event.systemPrompt,
+        event.historyMessages,
+        event.prompt,
+      );
+    } else {
+      const normalizedSessionHistory = session.initialHistoryMessages ?? [];
+      const hasSystemMessageInHistory = normalizedSessionHistory.some(
+        (message) => message.role === 'system',
+      );
+      fullInput = [
+        ...(hasSystemMessageInHistory
+          ? []
+          : systemInstructions.length > 0
+            ? [{ role: 'system', parts: systemInstructions }]
+            : []),
+        ...normalizedSessionHistory,
+        {
+          role: 'user',
+          parts: [{ type: 'text', content: event.prompt }],
+        },
+      ];
+    }
+  }
 
   spanStore.setLlmSpan(sessionKey, event.runId, {
-    span,
-    ctx: spanCtx,
     runId: event.runId,
-    provider: event.provider,
+    agentName: ctx.agentId || 'agent',
+    provider: resolvedProvider,
     model: event.model,
     startTime: Date.now(),
+    inputMessages: fullInput,
+    systemInstructions,
   });
+
+  session.latestSystemInstructions = systemInstructions;
+  if (fullInput.length > 0) {
+    session.latestAllMessages = fullInput;
+  }
 }

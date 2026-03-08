@@ -4,3 +4,12 @@ dist/
 .env
 .env.*
 coverage/
+
+# Local test fixtures and replacement helpers
+scripts/newreal1_replaced.json
+scripts/newreal1.json
+scripts/otherrealpydantic_replaced.json
+scripts/otherrealpydantic.json
+scripts/real.json
+scripts/real2.json
+scripts/replace_long_strings.py
