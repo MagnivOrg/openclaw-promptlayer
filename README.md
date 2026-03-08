@@ -92,6 +92,22 @@ Then restart OpenClaw. The plugin reads `LOGFIRE_TOKEN` at runtime and starts ex
 
 If `LOGFIRE_TOKEN` is missing, the plugin disables itself and logs an error instead of starting half-configured.
 
+## What You See In Logfire
+
+Once the plugin is configured, OpenClaw runs show up in Logfire as a trace timeline with alternating chat and tool phases, plus detailed per-span token and payload views.
+
+### Trace timeline
+
+This is the high-level view of an agent run in Logfire:
+
+![OpenClaw trace timeline in Logfire](./img/image2.png)
+
+### Chat span details
+
+You can also open an individual `chat <model>` span to inspect model, token, and captured input details:
+
+![OpenClaw chat span details in Logfire](./img/image1.png)
+
 ## Recommended Configuration
 
 This example is based on a real OpenClaw setup and works well when you want rich debugging and full message capture. Replace placeholders before use.
