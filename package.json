@@ -1,12 +1,12 @@
 {
-  "name": "@shichen335/openclaw-promptlayer",
+  "name": "@promptlayer/openclaw-promptlayer",
   "version": "1.0.0",
   "description": "PromptLayer observability plugin for OpenClaw using vanilla OTEL GenAI spans",
   "license": "MIT",
-  "author": "shichen335",
+  "author": "Magniv",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chenbaiyujason/openclaw-promptlayer.git"
+    "url": "git+https://github.com/MagnivOrg/openclaw-promptlayer.git"
   },
   "keywords": [
     "openclaw",
@@ -36,9 +36,9 @@
     "LICENSE",
     "CHANGELOG.md"
   ],
-  "homepage": "https://github.com/chenbaiyujason/openclaw-promptlayer#readme",
+  "homepage": "https://github.com/MagnivOrg/openclaw-promptlayer#readme",
   "bugs": {
-    "url": "https://github.com/chenbaiyujason/openclaw-promptlayer/issues"
+    "url": "https://github.com/MagnivOrg/openclaw-promptlayer/issues"
   },
   "publishConfig": {
     "access": "public"

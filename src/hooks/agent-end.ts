@@ -263,7 +263,7 @@ function finalizeAgentEndNow(
       message: errorMsg,
     });
 
-    // 出错时打出模型与输入摘要，便于排查 LLM timeout 等
+    // Include model and input context to make LLM timeouts easier to debug.
     const modelStr = session.model ?? 'unknown';
     const runIdStr = session.lastLlmRunId ?? '';
     const inputPreview = (session.lastLlmPrompt ?? '').replace(/\s+/g, ' ').trim();
@@ -325,8 +325,8 @@ export function handleAgentEnd(
   const session = spanStore.get(sessionKey);
   if (!session) return;
 
-  // 主路径：真的等到最后一个 llm_output 收尾后再结束 agent span。
-  // 仅当 llm_output 丢失时，watchdog 才兜底强制收尾，避免悬挂 session。
+  // Prefer waiting for the final llm_output before closing the agent span.
+  // The watchdog only forces finalization when llm_output never arrives.
   if (session.llmSpans.size > 0) {
     if (!session.deferredAgentEnd) {
       session.deferredAgentEnd = {

@@ -30,9 +30,9 @@ export interface LlmSpanEntry {
   provider: string;
   model: string;
   startTime: number;
-  /** 当前轮请求基底，用于在 llm_output 和 agent_end 汇总完整消息。 */
+  /** Base request messages for the current LLM call. */
   inputMessages: GenAiChatMessage[];
-  /** 当前轮 system instructions，供 chat span 与根 span 复用。 */
+  /** System instructions shared by the chat span and session summary. */
   systemInstructions: SystemInstructionPart[];
   /** Tool definitions available to this LLM call. */
   toolDefinitions?: GenAiToolDefinition[];
@@ -80,7 +80,7 @@ export interface SessionSpanContext {
   /** Completed LLM hook payloads waiting to be reconciled at agent_end. */
   completedLlmCalls: LlmSpanEntry[];
 
-  /** 已完成的工具调用记录，供 llm_output 阶段化重建 chat spans。 */
+  /** Completed tool calls used when reconstructing later chat spans. */
   completedToolCalls: CompletedToolCall[];
 
   /** Accumulated token usage across all LLM calls */
@@ -92,16 +92,16 @@ export interface SessionSpanContext {
   /** Last known provider (set by llm_input/llm_output hooks) */
   provider?: string;
 
-  /** Last LLM runId (set by llm_input), 用于 agent 出错时日志关联 */
+  /** Last LLM runId, used to correlate agent error logs. */
   lastLlmRunId?: string;
 
-  /** Last LLM 输入摘要 (set by llm_input)，agent 出错时打出便于排查 */
+  /** Last LLM input preview, used in agent error logs. */
   lastLlmPrompt?: string;
 
-  /** 当前会话最后一轮可用于根 span 展示的完整消息。 */
+  /** Latest full message set for the current session. */
   latestAllMessages?: GenAiChatMessage[];
 
-  /** 当前会话最后一轮 system instructions。 */
+  /** Latest system instructions for the current session. */
   latestSystemInstructions?: SystemInstructionPart[];
 
   /** Last emitted chat span end time, used to sequence reconstructed final calls. */
@@ -113,7 +113,7 @@ export interface SessionSpanContext {
   /** Whether the last emitted chat span requested tool execution. */
   lastChatHadToolCall?: boolean;
 
-  /** agent_start 阶段拿到的会话历史，作为 llm_input 缺省 history 的兜底。 */
+  /** History captured at agent start for llm_input fallback. */
   initialHistoryMessages?: GenAiChatMessage[];
 
   /** Monotonic tool call counter for sequencing */
@@ -125,7 +125,7 @@ export interface SessionSpanContext {
   /** Request start timestamp */
   startTime: number;
 
-  /** agent_end 已触发，等待最后一个 llm_output 收尾后再真正结束 agent span */
+  /** Deferred agent_end data while waiting for pending llm_output events. */
   deferredAgentEnd?: {
     event: AgentEndEvent;
     ctx: AgentContext;
@@ -205,7 +205,7 @@ class SpanStore {
     session.completedLlmCalls.push(entry);
   }
 
-  /** 记录已完成的工具调用，供后续阶段化重建 chat spans。 */
+  /** Record a completed tool call for later chat span reconstruction. */
   addCompletedToolCall(sessionKey: string, entry: CompletedToolCall): void {
     const session = this.sessions.get(sessionKey);
     if (!session) return;

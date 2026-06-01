@@ -67,7 +67,7 @@ export function handleLlmInput(
 
   session.model = event.model;
   session.provider = resolvedProvider;
-  // 保存最后一次 LLM 调用的 runId 与输入摘要，供 agent 出错时日志使用
+  // Keep the latest LLM call id and input preview for agent error logs.
   session.lastLlmRunId = event.runId;
   session.lastLlmPrompt = prepareForCapture(
     event.prompt,

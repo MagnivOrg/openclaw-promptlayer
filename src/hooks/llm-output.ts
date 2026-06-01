@@ -23,13 +23,13 @@ export interface LlmOutputEvent {
   runId: string;
   provider: string;
   model: string;
-  /** 流式拼接后的纯文本输出，可在 lastAssistant 不完整时兜底。 */
+  /** Stream-assembled text output, used as a fallback when lastAssistant is incomplete. */
   assistantTexts?: string[];
-  /** 当轮 assistant 消息（OpenAI/Anthropic/Google 等格式），用于 gen_ai.output.messages */
+  /** Assistant message for this turn, in OpenAI/Anthropic/Google-style shapes. */
   lastAssistant?: unknown;
-  /** 当轮结束原因，如 'stop' | 'tool_call' | 'length' 等 */
+  /** Finish reason for this turn, such as 'stop', 'tool_call', or 'length'. */
   finishReason?: string;
-  /** 若 provider SDK 暴露 response id，可直接透传。 */
+  /** Provider response id when exposed by the SDK. */
   responseId?: string;
   usage?: {
     input?: number;

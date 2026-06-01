@@ -112,7 +112,7 @@ export function resolveGenAiSystemName(
   return provider ?? 'unknown';
 }
 
-/** OTel / Pydantic AI 兼容的消息 part。 */
+/** OTel GenAI-compatible message part. */
 export interface GenAiMessagePart {
   type: string;
   content?: string;
@@ -123,7 +123,7 @@ export interface GenAiMessagePart {
   response?: string | Record<string, unknown>;
 }
 
-/** OTel GenAI 单条消息：role + parts，用于 gen_ai.input.messages / gen_ai.output.messages */
+/** OTel GenAI message shape used for gen_ai.input.messages and gen_ai.output.messages. */
 export interface GenAiChatMessage {
   role: string;
   parts: GenAiMessagePart[];
@@ -131,7 +131,7 @@ export interface GenAiChatMessage {
   finish_reason?: string;
 }
 
-/** system instructions 的最小结构。 */
+/** Minimal system instruction part shape. */
 export interface SystemInstructionPart {
   type: 'text';
   content: string;
@@ -144,7 +144,7 @@ export interface GenAiToolDefinition {
   parameters?: unknown;
 }
 
-/** 输入消息规范化选项。 */
+/** Input message normalization options. */
 export interface NormalizeInputMessagesOptions {
   toolResultRole?: 'tool' | 'user';
 }
@@ -281,8 +281,9 @@ export function normalizeToGenAiInputMessages(
 }
 
 /**
- * 将 OpenClaw/OpenAI/Anthropic 样式的单条 assistant 消息转为 OTel GenAI gen_ai.output.messages 格式。
- * 支持：content 字符串、content 数组（text / tool_use / reasoning）、tool_calls。
+ * Convert one OpenClaw/OpenAI/Anthropic-style assistant message to
+ * the OTel GenAI gen_ai.output.messages shape.
+ * Supports string content, content arrays (text / tool_use / reasoning), and tool_calls.
  * This preserves multi-turn, tool-call, and reasoning structure.
  */
 function appendTaggedOutputParts(parts: GenAiMessagePart[], rawText: string): void {
@@ -330,7 +331,7 @@ function appendOutputPartsFromString(parts: GenAiMessagePart[], rawText: string)
         appendOutputPartFromBlock(parts, parsedLine);
         continue;
       } catch {
-        // 不是合法 JSON 行时，回退到普通文本解析
+        // Not valid JSONL; fall back to plain text parsing.
       }
     }
 
@@ -406,7 +407,7 @@ export function normalizeToGenAiOutputMessages(
   const toolCalls = raw.tool_calls as Array<Record<string, unknown>> | undefined;
 
   if (content === undefined || content === null) {
-    // 仅 tool_calls 时可能无 content
+    // Tool-call-only assistant messages may not include content.
   } else if (typeof content === 'string') {
     appendOutputPartsFromString(parts, content);
   } else if (Array.isArray(content)) {
@@ -441,9 +442,9 @@ export function normalizeToGenAiOutputMessages(
 }
 
 /**
- * 构建单次 LLM 调用的完整 gen_ai.input.messages（OTel GenAI 语义）：
- * 可选的 system + historyMessages 规范化 + 当前轮用户消息（prompt）。
- * 保留多轮对话、工具调用、思考等结构。
+ * Build gen_ai.input.messages for one LLM call:
+ * optional system instructions, normalized history, and the current user prompt.
+ * Preserves multi-turn, tool-call, and reasoning structure.
  */
 export function buildFullInputMessages(
   systemPrompt: string | undefined,
@@ -472,7 +473,7 @@ export function buildFullInputMessages(
   return out;
 }
 
-/** 将 system prompt 规范化为 GenAI message parts。 */
+/** Normalize a system prompt to GenAI message parts. */
 export function buildSystemInstructions(
   systemPrompt: string | undefined,
 ): SystemInstructionPart[] {
@@ -482,7 +483,7 @@ export function buildSystemInstructions(
   return [{ type: 'text', content: trimmedPrompt }];
 }
 
-/** 基于当前轮输入基底与最新 assistant 输出构造根 span 的完整消息数组。 */
+/** Build the full message array from the current input base and assistant output. */
 export function buildPydanticAiAllMessages(
   baseMessages: GenAiChatMessage[] | undefined,
   assistantMessages: GenAiChatMessage[],
@@ -492,7 +493,7 @@ export function buildPydanticAiAllMessages(
   return [...normalizedBaseMessages, ...assistantMessages];
 }
 
-/** 将 agent_end 的完整 messages 快照转为可供根/chat span 复用的消息数组。 */
+/** Convert the agent_end message snapshot into reusable GenAI messages. */
 export function buildMessagesFromConversationHistory(
   messages: unknown[] | undefined,
 ): GenAiChatMessage[] {
@@ -535,7 +536,7 @@ function isMessageEquivalent(left: GenAiChatMessage, right: GenAiChatMessage): b
   return safeJsonStringify(left) === safeJsonStringify(right);
 }
 
-/** 从完整会话消息中切出当前 LLM 调用对应的输出片段。 */
+/** Extract the output segment corresponding to the current LLM call. */
 export function extractConversationOutputMessages(
   fullConversationMessages: GenAiChatMessage[],
   inputMessages: GenAiChatMessage[],
@@ -555,7 +556,7 @@ export function extractConversationOutputMessages(
   return fullConversationMessages.slice(comparableInputMessages.length);
 }
 
-/** 将 assistantTexts 兜底转成一条 assistant 消息。 */
+/** Convert assistantTexts fallback content into one assistant message. */
 export function buildAssistantMessagesFromTexts(
   assistantTexts: string[] | undefined,
   finishReason?: string,
@@ -579,7 +580,7 @@ export function buildAssistantMessagesFromTexts(
   return [message];
 }
 
-/** 提取最终回答正文，优先取最后一条 assistant 的 text part。 */
+/** Extract the final answer text from the last assistant text part. */
 export function extractFinalResult(
   allMessages: GenAiChatMessage[],
 ): string | undefined {
