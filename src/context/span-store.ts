@@ -11,7 +11,7 @@ import type { Span, Context } from '@opentelemetry/api';
 import type { PromptLayerPluginConfig } from '../config.js';
 import type { Logger, AgentEndEvent } from '../hooks/agent-end.js';
 import type { AgentContext } from '../hooks/before-agent-start.js';
-import type { GenAiChatMessage, SystemInstructionPart } from '../util.js';
+import type { GenAiChatMessage, GenAiToolDefinition, SystemInstructionPart } from '../util.js';
 
 export interface ToolSpanEntry {
   span: Span;
@@ -34,6 +34,8 @@ export interface LlmSpanEntry {
   inputMessages: GenAiChatMessage[];
   /** 当前轮 system instructions，供 chat span 与根 span 复用。 */
   systemInstructions: SystemInstructionPart[];
+  /** Tool definitions available to this LLM call. */
+  toolDefinitions?: GenAiToolDefinition[];
 }
 
 export interface CompletedToolCall {
@@ -44,17 +46,6 @@ export interface CompletedToolCall {
   endTime: number;
   params?: Record<string, unknown>;
   result?: unknown;
-}
-
-export interface ToolGroupEntry {
-  span: Span;
-  ctx: Context;
-  runId: string;
-  toolNames: string[];
-  openToolCount: number;
-  startTime: number;
-  /** 最近一次工具批次自然结束时间；若仍在执行中则为空。 */
-  endTime?: number;
 }
 
 export interface TokenAccumulator {
@@ -77,9 +68,6 @@ export interface SessionSpanContext {
 
   /** 已完成的工具调用记录，供 llm_output 阶段化重建 chat spans。 */
   completedToolCalls: CompletedToolCall[];
-
-  /** 当前 run 正在执行的工具组 span。 */
-  activeToolGroups: Map<string, ToolGroupEntry>;
 
   /** Accumulated token usage across all LLM calls */
   tokens: TokenAccumulator;
@@ -195,26 +183,6 @@ class SpanStore {
     session.completedToolCalls.push(entry);
   }
 
-  getToolGroup(sessionKey: string, runId: string): ToolGroupEntry | undefined {
-    return this.sessions.get(sessionKey)?.activeToolGroups.get(runId);
-  }
-
-  setToolGroup(sessionKey: string, runId: string, entry: ToolGroupEntry): void {
-    const session = this.sessions.get(sessionKey);
-    if (!session) return;
-    session.activeToolGroups.set(runId, entry);
-  }
-
-  deleteToolGroup(sessionKey: string, runId: string): ToolGroupEntry | undefined {
-    const session = this.sessions.get(sessionKey);
-    if (!session) return undefined;
-    const entry = session.activeToolGroups.get(runId);
-    if (entry) {
-      session.activeToolGroups.delete(runId);
-    }
-    return entry;
-  }
-
   get size(): number {
     return this.sessions.size;
   }
@@ -227,9 +195,6 @@ class SpanStore {
         // Close children before parent — reverse order (LIFO)
         for (let i = session.toolStack.length - 1; i >= 0; i--) {
           session.toolStack[i].span.end();
-        }
-        for (const toolGroup of session.activeToolGroups.values()) {
-          toolGroup.span.end(toolGroup.endTime);
         }
         session.agentSpan.end();
         this.sessions.delete(key);

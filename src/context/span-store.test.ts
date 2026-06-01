@@ -32,7 +32,6 @@ describe('SpanStore', () => {
       toolStack: [],
       llmSpans: new Map(),
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,

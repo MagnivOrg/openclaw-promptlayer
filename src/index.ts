@@ -7,7 +7,7 @@ import { handleToolResultPersist } from './hooks/tool-result-persist.js';
 import { handleAgentEnd } from './hooks/agent-end.js';
 import { handleLlmInput } from './hooks/llm-input.js';
 import { handleLlmOutput } from './hooks/llm-output.js';
-import type { NodeSDK } from '@opentelemetry/sdk-node';
+import type { PromptLayerOtel } from './otel.js';
 import type { BeforeAgentStartEvent, AgentContext } from './hooks/before-agent-start.js';
 import type { BeforeToolCallEvent, ToolContext } from './hooks/before-tool-call.js';
 import type { ToolResultPersistEvent, ToolResultPersistContext } from './hooks/tool-result-persist.js';
@@ -44,7 +44,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-let sdk: NodeSDK | null = null;
+let otel: PromptLayerOtel | null = null;
 
 export default function register(api: PluginApi): void {
   const config = resolveConfig(api.pluginConfig);
@@ -58,7 +58,7 @@ export default function register(api: PluginApi): void {
   }
 
   try {
-    sdk = initializeOtel(config);
+    otel = initializeOtel(config, api.logger);
   } catch (err) {
     api.logger.error(`PromptLayer plugin init failed: ${err}`);
     return;
@@ -74,6 +74,19 @@ export default function register(api: PluginApi): void {
       );
     } catch (err) {
       api.logger.warn(`PromptLayer before_agent_start error: ${err}`);
+    }
+  });
+
+  api.on('before_prompt_build', (event, ctx) => {
+    if (!isRecord(event) || !isRecord(ctx)) return;
+    try {
+      handleBeforeAgentStart(
+        event as unknown as BeforeAgentStartEvent,
+        ctx as unknown as AgentContext,
+        config,
+      );
+    } catch (err) {
+      api.logger.warn(`PromptLayer before_prompt_build error: ${err}`);
     }
   });
 
@@ -143,9 +156,10 @@ export default function register(api: PluginApi): void {
       );
     },
     stop: async () => {
-      if (sdk) {
-        await sdk.shutdown();
-        api.logger.info('PromptLayer: OTEL SDK shut down');
+      if (otel) {
+        await otel.shutdown();
+        otel = null;
+        api.logger.info('PromptLayer: OTEL exporter shut down');
       }
     },
   });

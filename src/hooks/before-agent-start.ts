@@ -11,10 +11,10 @@ import { trace, context, SpanKind } from '@opentelemetry/api';
 import { spanStore, type SessionSpanContext } from '../context/span-store.js';
 import {
   extractWorkspaceName,
-  INSTRUMENTATION_SCOPE_NAME,
   normalizeToGenAiInputMessages,
 } from '../util.js';
 import type { PromptLayerPluginConfig } from '../config.js';
+import { getPromptLayerTracer } from '../otel.js';
 
 /** OpenClaw before_agent_start event payload. */
 export interface BeforeAgentStartEvent {
@@ -39,7 +39,18 @@ export function handleBeforeAgentStart(
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
 
-  const tracer = trace.getTracer(INSTRUMENTATION_SCOPE_NAME, '1.0.0');
+  const existingSession = spanStore.get(sessionKey);
+  if (existingSession) {
+    if (
+      (existingSession.initialHistoryMessages?.length ?? 0) === 0 &&
+      Array.isArray(event.messages)
+    ) {
+      existingSession.initialHistoryMessages = normalizeToGenAiInputMessages(event.messages);
+    }
+    return;
+  }
+
+  const tracer = getPromptLayerTracer();
   const agentName = ctx.agentId || 'agent';
   const workspace = extractWorkspaceName(ctx.workspaceDir);
 
@@ -77,7 +88,6 @@ export function handleBeforeAgentStart(
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,

@@ -137,9 +137,20 @@ export interface SystemInstructionPart {
   content: string;
 }
 
+export interface GenAiToolDefinition {
+  type: 'function';
+  name: string;
+  description?: string;
+  parameters?: unknown;
+}
+
 /** 输入消息规范化选项。 */
 export interface NormalizeInputMessagesOptions {
   toolResultRole?: 'tool' | 'user';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 /**
@@ -154,7 +165,7 @@ export function normalizeToGenAiInputMessages(
   if (!Array.isArray(messages) || messages.length === 0) return [];
 
   const out: GenAiChatMessage[] = [];
-  const toolResultRole = options?.toolResultRole ?? 'user';
+  const toolResultRole = options?.toolResultRole ?? 'tool';
 
   for (const msg of messages) {
     if (!msg || typeof msg !== 'object') continue;
@@ -486,7 +497,38 @@ export function buildMessagesFromConversationHistory(
   messages: unknown[] | undefined,
 ): GenAiChatMessage[] {
   if (!Array.isArray(messages) || messages.length === 0) return [];
-  return normalizeToGenAiInputMessages(messages, { toolResultRole: 'user' });
+  return normalizeToGenAiInputMessages(messages, { toolResultRole: 'tool' });
+}
+
+export function normalizeToGenAiToolDefinitions(
+  tools: unknown[] | undefined,
+): GenAiToolDefinition[] {
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+
+  const out: GenAiToolDefinition[] = [];
+  for (const tool of tools) {
+    if (!isRecord(tool)) continue;
+
+    const rawFunction = isRecord(tool.function) ? tool.function : undefined;
+    const source = rawFunction ?? tool;
+    const rawName = source.name;
+    if (typeof rawName !== 'string' || rawName === '') continue;
+
+    const definition: GenAiToolDefinition = {
+      type: 'function',
+      name: rawName,
+    };
+    if (typeof source.description === 'string' && source.description !== '') {
+      definition.description = source.description;
+    }
+    const parameters = source.parameters ?? source.input_schema ?? source.schema;
+    if (parameters !== undefined) {
+      definition.parameters = parameters;
+    }
+    out.push(definition);
+  }
+
+  return out;
 }
 
 function isMessageEquivalent(left: GenAiChatMessage, right: GenAiChatMessage): boolean {

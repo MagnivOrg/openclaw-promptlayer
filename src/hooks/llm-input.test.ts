@@ -4,9 +4,23 @@ import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
 import { handleLlmInput } from './llm-input.js';
 import type { LlmInputEvent, LlmContext } from './llm-input.js';
 
-const { mockTracerInstance } = vi.hoisted(() => {
+const { mockAgentSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
+  const span = {
+    end: vi.fn(),
+    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
+    setAttribute: vi.fn().mockReturnThis(),
+    setStatus: vi.fn().mockReturnThis(),
+    addEvent: vi.fn().mockReturnThis(),
+    addLink: vi.fn().mockReturnThis(),
+    recordException: vi.fn().mockReturnThis(),
+    isRecording: vi.fn(() => true),
+    updateName: vi.fn().mockReturnThis(),
+    setAttributes: vi.fn().mockReturnThis(),
+  };
   return {
-    mockTracerInstance: { startSpan: vi.fn() },
+    mockAgentSpan: span,
+    mockTracerInstance: { startSpan: vi.fn(() => span) },
+    mockSetSpan: vi.fn(() => ({})),
   };
 });
 
@@ -16,9 +30,17 @@ vi.mock('@opentelemetry/api', async () => {
     ...actual,
     trace: {
       getTracer: vi.fn(() => mockTracerInstance),
+      setSpan: mockSetSpan,
+    },
+    context: {
+      active: vi.fn(() => ({})),
     },
   };
 });
+
+vi.mock('../otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
 
 function seedSession(sessionKey: string) {
   const agentSpan = mockSpan();
@@ -28,7 +50,6 @@ function seedSession(sessionKey: string) {
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
@@ -99,6 +120,34 @@ describe('handleLlmInput', () => {
     ]);
     expect(llmEntry!.systemInstructions).toEqual([
       { type: 'text', content: 'You are helpful' },
+    ]);
+  });
+
+  it('stores normalized tool definitions for the LLM span', () => {
+    seedSession('sess-1');
+
+    handleLlmInput(
+      {
+        ...baseEvent,
+        tools: [
+          {
+            name: 'read',
+            description: 'Read a file',
+            input_schema: { type: 'object', properties: { file_path: { type: 'string' } } },
+          },
+        ],
+      },
+      baseCtx,
+      createTestConfig(),
+    );
+
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.toolDefinitions).toEqual([
+      {
+        type: 'function',
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { file_path: { type: 'string' } } },
+      },
     ]);
   });
 
@@ -222,10 +271,15 @@ describe('handleLlmInput', () => {
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
 
-  it('returns early when session is not found', () => {
-    // Don't seed session
+  it('creates a fallback session when the prompt hook did not fire', () => {
     handleLlmInput(baseEvent, baseCtx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
+      'invoke_agent my-agent',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(spanStore.get('sess-1')?.agentSpan).toBe(mockAgentSpan);
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')).toBeDefined();
   });
 });

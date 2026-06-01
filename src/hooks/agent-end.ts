@@ -59,9 +59,6 @@ function finalizeAgentEndNow(
   for (let i = session.toolStack.length - 1; i >= 0; i--) {
     session.toolStack[i].span.end();
   }
-  for (const toolGroup of session.activeToolGroups.values()) {
-    toolGroup.span.end(toolGroup.endTime);
-  }
 
   // Close any pending LLM spans (aborted mid-call)
   session.llmSpans.clear();

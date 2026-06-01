@@ -14,7 +14,6 @@ function seedSessionWithTool(sessionKey: string, toolName: string) {
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 1,
     hasError: false,
@@ -130,7 +129,6 @@ describe('handleToolResultPersist', () => {
       toolStack: [],
       llmSpans: new Map(),
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 2,
       hasError: false,
@@ -171,7 +169,6 @@ describe('handleToolResultPersist', () => {
       toolStack: [],
       llmSpans: new Map(),
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,
@@ -215,29 +212,4 @@ describe('handleToolResultPersist', () => {
     );
   });
 
-  it('finalizes the running tools group when the last tool completes', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-    const runningToolsSpan = mockSpan();
-    const session = spanStore.get('sess-1');
-    if (!session) throw new Error('expected session');
-    session.activeToolGroups.set('run-1', {
-      span: runningToolsSpan,
-      ctx: mockContext(),
-      runId: 'run-1',
-      toolNames: ['Read'],
-      openToolCount: 1,
-      startTime: Date.now() - 150,
-    });
-
-    const activeTool = spanStore.peekTool('sess-1');
-    if (!activeTool) throw new Error('expected active tool');
-    activeTool.runId = 'run-1';
-
-    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
-
-    expect(toolSpan.end).toHaveBeenCalled();
-    expect(runningToolsSpan.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
-    expect(runningToolsSpan.end).toHaveBeenCalled();
-    expect(spanStore.getToolGroup('sess-1', 'run-1')).toBeUndefined();
-  });
 });

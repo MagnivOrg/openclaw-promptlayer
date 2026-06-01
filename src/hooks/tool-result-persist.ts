@@ -18,20 +18,6 @@ import {
 import type { PromptLayerPluginConfig } from '../config.js';
 
 const TOOL_SPAN_DURATION_FLOOR_MS = 1;
-const TOOL_GROUP_TAIL_MS = 2;
-
-function finalizeToolGroupSpan(sessionKey: string, runId: string, fallbackEndTime: number): void {
-  const toolGroup = spanStore.deleteToolGroup(sessionKey, runId);
-  if (!toolGroup) return;
-  toolGroup.span.setAttribute('tools', toolGroup.toolNames);
-  toolGroup.span.setStatus({ code: SpanStatusCode.OK });
-  toolGroup.span.end(
-    Math.max(
-      toolGroup.startTime + TOOL_SPAN_DURATION_FLOOR_MS,
-      toolGroup.endTime ?? fallbackEndTime,
-    ),
-  );
-}
 
 /** OpenClaw tool_result_persist event payload. */
 export interface ToolResultPersistEvent {
@@ -104,18 +90,6 @@ export function handleToolResultPersist(
       params: entry.params,
       result: event.message,
     });
-    if (typeof entry.runId === 'string' && entry.runId !== '') {
-      const toolGroup = spanStore.getToolGroup(sessionKey, entry.runId);
-      if (toolGroup) {
-        toolGroup.openToolCount = Math.max(0, toolGroup.openToolCount - 1);
-        toolGroup.endTime = toolEndTime + TOOL_GROUP_TAIL_MS;
-        if (toolGroup.openToolCount === 0) {
-          // 纯按 hook 顺序收束：当前一批工具全部结束后，立刻关闭 group，
-          // 下一个 before_tool_call 自然会开启新的一批，而不是跨 assistant 往返复用。
-          finalizeToolGroupSpan(sessionKey, entry.runId, toolEndTime + TOOL_GROUP_TAIL_MS);
-        }
-      }
-    }
   } finally {
     entry.span.end(toolEndTime);
   }

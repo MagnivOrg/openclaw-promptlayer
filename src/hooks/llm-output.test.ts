@@ -63,6 +63,10 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
+vi.mock('../otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
+
 function seedSessionWithLlm(sessionKey: string, runId: string) {
   const agentSpan = mockSpan();
   const agentCtx = mockContext();
@@ -73,7 +77,6 @@ function seedSessionWithLlm(sessionKey: string, runId: string) {
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
@@ -225,6 +228,34 @@ describe('handleLlmOutput', () => {
         finish_reason: 'stop',
       },
     ]);
+  });
+
+  it('writes gen_ai.tool.definitions onto the reconstructed chat span', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+    const llmEntry = spanStore.getLlmSpan('sess-1', 'run-1');
+    if (!llmEntry) throw new Error('expected llm entry');
+    llmEntry.toolDefinitions = [
+      {
+        type: 'function',
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { file_path: { type: 'string' } } },
+      },
+    ];
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: { role: 'assistant', content: 'Hi there' },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true }),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    expect(spanAttributes['gen_ai.tool.definitions']).toContain('"name":"read"');
+    expect(spanAttributes['gen_ai.tool.definitions']).toContain('"parameters"');
   });
 
   it('falls back to assistantTexts when lastAssistant is missing', () => {
@@ -506,7 +537,6 @@ describe('handleLlmOutput', () => {
       toolStack: [],
       llmSpans: new Map(),
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,

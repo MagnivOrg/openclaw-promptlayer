@@ -41,6 +41,10 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
+vi.mock('../otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
+
 describe('handleBeforeAgentStart', () => {
   const config = createTestConfig({ providerName: 'anthropic' });
 
@@ -179,5 +183,27 @@ describe('handleBeforeAgentStart', () => {
       }),
       expect.anything(),
     );
+  });
+
+  it('reuses an existing session when multiple root hooks fire', () => {
+    const ctx: AgentContext = {
+      agentId: 'my-agent',
+      sessionKey: 'session-1',
+    };
+
+    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforeAgentStart(
+      {
+        ...baseEvent,
+        messages: [{ role: 'user', content: 'history' }],
+      },
+      ctx,
+      config,
+    );
+
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(spanStore.get('session-1')?.initialHistoryMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'history' }] },
+    ]);
   });
 });

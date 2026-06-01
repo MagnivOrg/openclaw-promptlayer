@@ -16,6 +16,7 @@ import {
   buildMessagesFromConversationHistory,
   extractConversationOutputMessages,
   extractFinalResult,
+  normalizeToGenAiToolDefinitions,
 } from './util.js';
 
 describe('safeJsonStringify', () => {
@@ -324,7 +325,7 @@ describe('buildPydanticAiAllMessages', () => {
 });
 
 describe('buildMessagesFromConversationHistory', () => {
-  it('keeps tool responses as user messages for GenAI message rendering', () => {
+  it('keeps tool responses as tool messages for GenAI message rendering', () => {
     expect(
       buildMessagesFromConversationHistory([
         {
@@ -344,7 +345,7 @@ describe('buildMessagesFromConversationHistory', () => {
         parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: { path: '/tmp/a' } }],
       },
       {
-        role: 'user',
+        role: 'tool',
         parts: [{ type: 'tool_call_response', id: 'call-1', name: 'write', result: 'ok' }],
       },
     ]);
@@ -362,7 +363,7 @@ describe('buildMessagesFromConversationHistory', () => {
       ]),
     ).toEqual([
       {
-        role: 'user',
+        role: 'tool',
         parts: [
           {
             type: 'tool_call_response',
@@ -382,7 +383,7 @@ describe('extractConversationOutputMessages', () => {
       { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
       { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
-      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
       { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
     ];
     const inputMessages = [
@@ -393,8 +394,51 @@ describe('extractConversationOutputMessages', () => {
 
     expect(extractConversationOutputMessages(fullConversation, inputMessages)).toEqual([
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
-      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
       { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+    ]);
+  });
+});
+
+describe('normalizeToGenAiToolDefinitions', () => {
+  it('normalizes OpenAI function tool definitions', () => {
+    expect(
+      normalizeToGenAiToolDefinitions([
+        {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'Read a file',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ]);
+  });
+
+  it('normalizes Anthropic-style tool definitions', () => {
+    expect(
+      normalizeToGenAiToolDefinitions([
+        {
+          name: 'read',
+          description: 'Read a file',
+          input_schema: { type: 'object', properties: { file_path: { type: 'string' } } },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { file_path: { type: 'string' } } },
+      },
     ]);
   });
 });

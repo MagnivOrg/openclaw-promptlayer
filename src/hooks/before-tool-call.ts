@@ -9,14 +9,13 @@
 import { trace, SpanKind } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
 import {
-  INSTRUMENTATION_SCOPE_NAME,
   prepareForCapture,
   generateCallId,
 } from '../util.js';
 import type { PromptLayerPluginConfig } from '../config.js';
+import { getPromptLayerTracer } from '../otel.js';
 
 const TOOL_SPAN_DURATION_FLOOR_MS = 1;
-const TOOL_GROUP_LEAD_MS = 2;
 
 /** OpenClaw before_tool_call event payload. */
 export interface BeforeToolCallEvent {
@@ -48,7 +47,7 @@ export function handleBeforeToolCall(
   const session = spanStore.get(sessionKey);
   if (!session) return;
 
-  const tracer = trace.getTracer(INSTRUMENTATION_SCOPE_NAME, '1.0.0');
+  const tracer = getPromptLayerTracer();
   const toolName =
     typeof ctx.toolName === 'string' && ctx.toolName.length > 0
       ? ctx.toolName
@@ -74,54 +73,13 @@ export function handleBeforeToolCall(
   const lastCompletedToolEndTime = (session.completedToolCalls ?? []).at(-1)?.endTime ?? 0;
   const toolStartTime = Math.max(
     Date.now(),
-    (relatedLlmEntry?.startTime ?? 0) + TOOL_GROUP_LEAD_MS + TOOL_SPAN_DURATION_FLOOR_MS,
-    lastCompletedToolEndTime + TOOL_GROUP_LEAD_MS + TOOL_SPAN_DURATION_FLOOR_MS,
+    (relatedLlmEntry?.startTime ?? 0) + TOOL_SPAN_DURATION_FLOOR_MS,
+    lastCompletedToolEndTime + TOOL_SPAN_DURATION_FLOOR_MS,
   );
-  const toolGroupStartTime = Math.max(0, toolStartTime - TOOL_GROUP_LEAD_MS);
 
   session.toolSequence++;
 
-  let toolParentCtx = session.agentCtx;
-  if (typeof relatedRunId === 'string' && relatedRunId !== '') {
-    const existingToolGroup = spanStore.getToolGroup(sessionKey, relatedRunId);
-    if (existingToolGroup) {
-      existingToolGroup.openToolCount += 1;
-      existingToolGroup.endTime = undefined;
-      if (!existingToolGroup.toolNames.includes(toolName)) {
-        existingToolGroup.toolNames.push(toolName);
-      }
-      existingToolGroup.span.updateName(
-        existingToolGroup.toolNames.length === 1
-          ? 'running 1 tool'
-          : `running ${existingToolGroup.toolNames.length} tools`,
-      );
-      existingToolGroup.span.setAttribute('tools', existingToolGroup.toolNames);
-      toolParentCtx = existingToolGroup.ctx;
-    } else {
-      const toolGroupName = 'running 1 tool';
-      const toolGroupSpan = tracer.startSpan(
-        toolGroupName,
-        {
-          kind: SpanKind.INTERNAL,
-          attributes: {
-            tools: [toolName],
-          },
-          startTime: toolGroupStartTime,
-        },
-        session.agentCtx,
-      );
-      const toolGroupCtx = trace.setSpan(session.agentCtx, toolGroupSpan);
-      spanStore.setToolGroup(sessionKey, relatedRunId, {
-        span: toolGroupSpan,
-        ctx: toolGroupCtx,
-        runId: relatedRunId,
-        toolNames: [toolName],
-        openToolCount: 1,
-        startTime: toolGroupStartTime,
-      });
-      toolParentCtx = toolGroupCtx;
-    }
-  }
+  const toolParentCtx = session.agentCtx;
 
   // Span name per spec: "execute_tool {gen_ai.tool.name}"
   const spanName = `execute_tool ${toolName}`;

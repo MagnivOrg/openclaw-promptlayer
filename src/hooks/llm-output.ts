@@ -21,14 +21,14 @@ import {
   normalizeToGenAiOutputMessages,
   type GenAiChatMessage,
   safeJsonStringify,
-  INSTRUMENTATION_SCOPE_NAME,
 } from '../util.js';
 import type { PromptLayerPluginConfig } from '../config.js';
 import type { LlmContext } from './llm-input.js';
+import { getPromptLayerTracer } from '../otel.js';
 
 const CHAT_TOOL_BOUNDARY_GAP_MS = 1;
-const TOOL_GROUP_LEAD_MS = 2;
-const TOOL_GROUP_TAIL_MS = 2;
+const TOOL_BOUNDARY_LEAD_MS = 2;
+const TOOL_BOUNDARY_TAIL_MS = 2;
 
 /** OpenClaw llm_output event payload (minimal — only fields we use). */
 export interface LlmOutputEvent {
@@ -90,7 +90,7 @@ function stripLeadingSystemMessages(messages: GenAiChatMessage[]): GenAiChatMess
 
 function isToolResponseMessage(message: GenAiChatMessage): boolean {
   return (
-    message.role === 'user' &&
+    (message.role === 'tool' || message.role === 'user') &&
     message.parts.length > 0 &&
     message.parts.every((part) => part.type === 'tool_call_response')
   );
@@ -281,13 +281,13 @@ function buildChatPhases(
         const matchedTools = completedTools.slice(toolCursor, toolCursor + toolCallCount);
         emitPhase(
           matchedTools[0] != null
-            ? matchedTools[0].startTime - TOOL_GROUP_LEAD_MS - CHAT_TOOL_BOUNDARY_GAP_MS
+            ? matchedTools[0].startTime - TOOL_BOUNDARY_LEAD_MS - CHAT_TOOL_BOUNDARY_GAP_MS
             : llmEndTime,
         );
         toolCursor += toolCallCount;
         const lastMatchedTool = matchedTools.at(-1);
         if (lastMatchedTool) {
-          phaseStartTime = lastMatchedTool.endTime + TOOL_GROUP_TAIL_MS + CHAT_TOOL_BOUNDARY_GAP_MS;
+          phaseStartTime = lastMatchedTool.endTime + TOOL_BOUNDARY_TAIL_MS + CHAT_TOOL_BOUNDARY_GAP_MS;
         }
       }
       continue;
@@ -319,7 +319,7 @@ function createChatSpan(
   isLastPhase: boolean,
   config: PromptLayerPluginConfig,
 ): void {
-  const tracer = trace.getTracer(INSTRUMENTATION_SCOPE_NAME, '1.0.0');
+  const tracer = getPromptLayerTracer();
   const spanName = `chat ${llmEntry.model || llmEntry.provider || 'unknown'}`;
   const conversationId = llmEntry.sessionKey || 'unknown';
   const attributes: Record<string, string | number | string[]> = {
@@ -352,6 +352,9 @@ function createChatSpan(
         config.toolInputMaxLength,
         config.redactSecrets,
       );
+    }
+    if (Array.isArray(llmEntry.toolDefinitions) && llmEntry.toolDefinitions.length > 0) {
+      attributes['gen_ai.tool.definitions'] = safeJsonStringify(llmEntry.toolDefinitions);
     }
     if (phase.outputMessages.length > 0) {
       attributes['gen_ai.output.messages'] = prepareForCapture(
@@ -440,7 +443,7 @@ export function handleLlmOutput(
       const llmEndTime = Math.max(
         Date.now(),
         (completedToolsForRun.at(-1)?.endTime ?? llmEntry.startTime) +
-          TOOL_GROUP_TAIL_MS +
+          TOOL_BOUNDARY_TAIL_MS +
           CHAT_TOOL_BOUNDARY_GAP_MS,
       );
       const deferredConversationMessages = buildMessagesFromConversationHistory(
@@ -477,21 +480,6 @@ export function handleLlmOutput(
         llmEndTime,
       );
       const phaseUsages = buildPhaseUsages(deferredConversationRawMessages);
-
-      const toolGroup =
-        typeof llmEntry.runId === 'string' && llmEntry.runId !== ''
-          ? spanStore.deleteToolGroup(sessionKey, llmEntry.runId)
-          : undefined;
-      if (toolGroup) {
-        toolGroup.span.setAttribute('tools', toolGroup.toolNames);
-        toolGroup.span.setStatus({ code: SpanStatusCode.OK });
-        toolGroup.span.end(
-          Math.max(
-            toolGroup.startTime + CHAT_TOOL_BOUNDARY_GAP_MS,
-            toolGroup.endTime ?? (completedToolsForRun.at(-1)?.endTime ?? llmEndTime),
-          ),
-        );
-      }
 
       phases.forEach((phase, index) => {
         createChatSpan(

@@ -5,19 +5,7 @@ import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
 import { handleBeforeToolCall } from './before-tool-call.js';
 import type { BeforeToolCallEvent, ToolContext } from './before-tool-call.js';
 
-const { mockRunningToolsSpan, mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
-  const runningToolsSpan = {
-    end: vi.fn(),
-    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'aaa', traceFlags: 1 })),
-    setAttribute: vi.fn().mockReturnThis(),
-    setStatus: vi.fn().mockReturnThis(),
-    addEvent: vi.fn().mockReturnThis(),
-    addLink: vi.fn().mockReturnThis(),
-    recordException: vi.fn().mockReturnThis(),
-    isRecording: vi.fn(() => true),
-    updateName: vi.fn().mockReturnThis(),
-    setAttributes: vi.fn().mockReturnThis(),
-  };
+const { mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
   const toolSpan = {
     end: vi.fn(),
     spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
@@ -31,12 +19,9 @@ const { mockRunningToolsSpan, mockToolSpan, mockTracerInstance, mockSetSpan } = 
     setAttributes: vi.fn().mockReturnThis(),
   };
   return {
-    mockRunningToolsSpan: runningToolsSpan,
     mockToolSpan: toolSpan,
     mockTracerInstance: {
-      startSpan: vi.fn((name: string) =>
-        name.startsWith('running ') ? runningToolsSpan : toolSpan
-      ),
+      startSpan: vi.fn(() => toolSpan),
     },
     mockSetSpan: vi.fn(() => ({})),
   };
@@ -54,6 +39,10 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
+vi.mock('../otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
+
 function seedSession(sessionKey: string) {
   spanStore.set(sessionKey, {
     agentSpan: mockSpan(),
@@ -61,7 +50,6 @@ function seedSession(sessionKey: string) {
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
@@ -233,7 +221,7 @@ describe('handleBeforeToolCall', () => {
     ]);
   });
 
-  it('creates a running tools group span before the execute_tool span', () => {
+  it('creates only the execute_tool span when runId is present', () => {
     seedSession('sess-1');
 
     handleBeforeToolCall(
@@ -242,25 +230,15 @@ describe('handleBeforeToolCall', () => {
       createTestConfig(),
     );
 
-    expect(mockTracerInstance.startSpan).toHaveBeenNthCalledWith(
-      1,
-      'running 1 tool',
-      expect.objectContaining({
-        attributes: expect.objectContaining({
-          tools: ['Read'],
-        }),
-      }),
-      expect.anything(),
-    );
-    expect(mockTracerInstance.startSpan).toHaveBeenNthCalledWith(
-      2,
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       'execute_tool Read',
       expect.anything(),
       expect.anything(),
     );
   });
 
-  it('reuses a recent idle tool group within the same batch window', () => {
+  it('creates sibling execute_tool spans across multiple tool calls', () => {
     seedSession('sess-1');
 
     handleBeforeToolCall(
@@ -269,47 +247,16 @@ describe('handleBeforeToolCall', () => {
       createTestConfig(),
     );
 
-    const session = spanStore.get('sess-1');
-    if (!session) throw new Error('expected session');
-    const toolGroup = session.activeToolGroups.get('run-1');
-    if (!toolGroup) throw new Error('expected tool group');
-    toolGroup.openToolCount = 0;
-    toolGroup.endTime = Date.now();
-
     handleBeforeToolCall(
       { toolName: 'Write', params: { path: '/tmp/a' }, runId: 'run-1' },
       { ...baseCtx, toolName: 'Write', runId: 'run-1' },
       createTestConfig(),
     );
 
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(3);
-    expect(mockRunningToolsSpan.end).not.toHaveBeenCalled();
-    expect(toolGroup.toolNames).toEqual(['Read', 'Write']);
-  });
-
-  it('starts a new tool group after the previous one is removed', () => {
-    seedSession('sess-1');
-
-    handleBeforeToolCall(
-      { ...baseEvent, runId: 'run-1' },
-      { ...baseCtx, runId: 'run-1' },
-      createTestConfig(),
-    );
-
-    const session = spanStore.get('sess-1');
-    if (!session) throw new Error('expected session');
-    const toolGroup = session.activeToolGroups.get('run-1');
-    if (!toolGroup) throw new Error('expected tool group');
-    session.activeToolGroups.delete('run-1');
-
-    handleBeforeToolCall(
-      { toolName: 'Write', params: { path: '/tmp/a' }, runId: 'run-1' },
-      { ...baseCtx, toolName: 'Write', runId: 'run-1' },
-      createTestConfig(),
-    );
-
-    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(4);
-    expect(mockRunningToolsSpan.end).not.toHaveBeenCalled();
-    expect(spanStore.getToolGroup('sess-1', 'run-1')?.toolNames).toEqual(['Write']);
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(2);
+    expect(mockTracerInstance.startSpan.mock.calls.map((call) => call[0])).toEqual([
+      'execute_tool Read',
+      'execute_tool Write',
+    ]);
   });
 });
