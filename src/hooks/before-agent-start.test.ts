@@ -92,8 +92,8 @@ describe('handleBeforeAgentStart', () => {
       {
         ...baseEvent,
         messages: [
-          { role: 'user', content: '历史问题' },
-          { role: 'assistant', content: '历史回答' },
+          { role: 'user', content: 'previous question' },
+          { role: 'assistant', content: 'previous answer' },
         ],
       },
       ctx,
@@ -101,8 +101,8 @@ describe('handleBeforeAgentStart', () => {
     );
 
     expect(spanStore.get('session-1')?.initialHistoryMessages).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: '历史问题' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '历史回答' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'previous question' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'previous answer' }] },
     ]);
   });
 
@@ -133,6 +133,12 @@ describe('handleBeforeAgentStart', () => {
       }),
       expect.anything(), // parent context
     );
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(
+      mockTracerInstance.startSpan.mock.calls.some(([name]) =>
+        String(name).startsWith('agent_turn'),
+      ),
+    ).toBe(false);
   });
 
   it('falls back to sessionId when sessionKey is missing', () => {

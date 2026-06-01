@@ -228,23 +228,42 @@ describe('handleLlmInput', () => {
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
 
-  it('falls back to initial session history when llm_input payload omits historyMessages', () => {
+  it('captures only the current prompt when history capture is disabled', () => {
     seedSession('sess-1');
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('expected session');
     session.initialHistoryMessages = [
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
     ];
 
     handleLlmInput(
-      { ...baseEvent, historyMessages: undefined, prompt: '当前问题' },
+      { ...baseEvent, historyMessages: undefined, prompt: 'current question' },
       baseCtx,
       createTestConfig({ captureMessageContent: true }),
     );
 
     expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
+    ]);
+  });
+
+  it('falls back to initial session history when history capture is enabled', () => {
+    seedSession('sess-1');
+    const session = spanStore.get('sess-1');
+    if (!session) throw new Error('expected session');
+    session.initialHistoryMessages = [
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+    ];
+
+    handleLlmInput(
+      { ...baseEvent, historyMessages: undefined, prompt: 'current question' },
+      baseCtx,
+      createTestConfig({ captureMessageContent: true, captureHistoryMessages: true }),
+    );
+
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
     ]);
   });
 

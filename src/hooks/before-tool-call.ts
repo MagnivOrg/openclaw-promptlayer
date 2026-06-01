@@ -108,7 +108,7 @@ export function handleBeforeToolCall(
     toolParentCtx,
   );
 
-  const toolCtx = trace.setSpan(session.agentCtx, toolSpan);
+  const toolCtx = trace.setSpan(toolParentCtx, toolSpan);
 
   spanStore.pushTool(sessionKey, {
     span: toolSpan,

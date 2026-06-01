@@ -24,6 +24,7 @@ const { mockTracerInstance, createdSpans } = vi.hoisted(() => {
   interface CreatedSpanRecord {
     name: string;
     options: Record<string, unknown>;
+    parent: unknown;
     span: MockTestSpan;
   }
 
@@ -43,9 +44,9 @@ const { mockTracerInstance, createdSpans } = vi.hoisted(() => {
   return {
     createdSpans: spanRecords,
     mockTracerInstance: {
-      startSpan: vi.fn((name: string, options: Record<string, unknown>) => {
+      startSpan: vi.fn((name: string, options: Record<string, unknown>, parent: unknown) => {
         const span = createSpan();
-        spanRecords.push({ name, options, span });
+        spanRecords.push({ name, options, parent, span });
         return span;
       }),
     },
@@ -97,7 +98,7 @@ function seedSessionWithLlm(sessionKey: string, runId: string) {
     systemInstructions: [],
   });
 
-  return { agentSpan };
+  return { agentSpan, agentCtx };
 }
 
 describe('handleLlmOutput', () => {
@@ -135,7 +136,7 @@ describe('handleLlmOutput', () => {
   it('accumulates tokens on the session', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
@@ -147,7 +148,7 @@ describe('handleLlmOutput', () => {
   it('accumulates across multiple LLM calls', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
 
     spanStore.setLlmSpan('sess-1', 'run-2', {
       runId: 'run-2',
@@ -265,7 +266,7 @@ describe('handleLlmOutput', () => {
       {
         ...baseEvent,
         lastAssistant: undefined,
-        assistantTexts: ['第一段', '第二段'],
+        assistantTexts: ['first segment', 'second segment'],
         finishReason: 'stop',
       },
       baseCtx,
@@ -273,25 +274,25 @@ describe('handleLlmOutput', () => {
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
-    expect(spanAttributes['gen_ai.output.messages']).toContain('第一段');
+    expect(spanAttributes['gen_ai.output.messages']).toContain('first segment');
     expect(spanStore.get('sess-1')?.latestAllMessages).toEqual([
       {
         role: 'assistant',
-        parts: [{ type: 'text', content: '第一段\n第二段' }],
+        parts: [{ type: 'text', content: 'first segment\nsecond segment' }],
         finish_reason: 'stop',
       },
     ]);
   });
 
-  it('rebuilds chat into multiple phases when deferred messages contain tool usage', () => {
-    seedSessionWithLlm('sess-1', 'run-1');
+  it('keeps a deferred final answer scoped to the current chat span', () => {
+    const { agentCtx } = seedSessionWithLlm('sess-1', 'run-1');
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('expected session');
     session.deferredAgentEnd = {
       event: {
         success: true,
         messages: [
-          { role: 'user', content: '请写文件' },
+          { role: 'user', content: 'write the file' },
           {
             role: 'assistant',
             content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } }],
@@ -300,16 +301,16 @@ describe('handleLlmOutput', () => {
             role: 'toolResult',
             toolCallId: 'call-1',
             toolName: 'write',
-            content: [{ type: 'text', text: '写入成功' }],
+            content: [{ type: 'text', text: 'write succeeded' }],
           },
           {
             role: 'assistant',
-            content: [{ type: 'text', text: '<final>已经写好啦</final>' }],
+            content: [{ type: 'text', text: '<final>done writing</final>' }],
           },
         ],
       },
       ctx: { agentId: 'my-agent', sessionKey: 'sess-1', workspaceDir: '/workspaces/marketing' },
-      config: createTestConfig(),
+      config: createTestConfig({ captureMessageContent: true }),
       logger: createMockLogger(),
       requestedAt: Date.now(),
     };
@@ -321,7 +322,7 @@ describe('handleLlmOutput', () => {
         startTime: Date.now(),
         endTime: Date.now() + 20,
         params: { file: '/tmp/a' },
-        result: '写入成功',
+        result: 'write succeeded',
       },
     ];
     spanStore.setLlmSpan('sess-1', 'run-1', {
@@ -331,14 +332,14 @@ describe('handleLlmOutput', () => {
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now() - 20,
-      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: '请写文件' }] }],
+      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: 'write the file' }] }],
       systemInstructions: [],
     });
 
     handleLlmOutput(
       {
         ...baseEvent,
-        lastAssistant: { role: 'assistant', content: '最后一条' },
+        lastAssistant: { role: 'assistant', content: 'last llm output' },
         finishReason: 'stop',
       },
       baseCtx,
@@ -346,15 +347,33 @@ describe('handleLlmOutput', () => {
     );
 
     expect(createdSpans).toHaveLength(2);
-    const firstPhaseAttributes = createdSpans[0].options.attributes as Record<string, string | string[]>;
-    const secondPhaseAttributes = createdSpans[1].options.attributes as Record<string, string | string[]>;
-    expect(firstPhaseAttributes['gen_ai.output.messages']).toContain('"tool_call"');
-    expect(firstPhaseAttributes['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
-    expect(secondPhaseAttributes['gen_ai.input.messages']).toContain('"tool_call_response"');
-    expect(secondPhaseAttributes['gen_ai.output.messages']).toContain('已经写好啦');
+    expect(createdSpans.map((span) => span.name)).toEqual([
+      'chat claude-sonnet-4-5-20250929',
+      'chat claude-sonnet-4-5-20250929',
+    ]);
+    expect(createdSpans.every((span) => span.parent === agentCtx)).toBe(true);
+
+    const firstAttributes = createdSpans[0].options.attributes as Record<string, string | string[]>;
+    expect(firstAttributes['gen_ai.operation.name']).toBe('chat');
+    expect(firstAttributes['gen_ai.output.messages']).toContain('"tool_call"');
+    expect(firstAttributes['gen_ai.completion.0.tool_calls']).toContain('write');
+    expect(firstAttributes['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+
+    const finalAttributes = createdSpans[1].options.attributes as Record<string, string | string[]>;
+    expect(finalAttributes['gen_ai.operation.name']).toBe('chat');
+    expect(finalAttributes['gen_ai.input.messages']).toContain('write the file');
+    expect(finalAttributes['gen_ai.input.messages']).toContain('"tool_call"');
+    expect(finalAttributes['gen_ai.input.messages']).toContain('"tool_call_response"');
+    expect(finalAttributes['gen_ai.output.messages']).toContain('done writing');
+    expect(finalAttributes['gen_ai.output.messages']).not.toContain('last llm output');
+    expect(finalAttributes['gen_ai.prompt.0.content']).toBe('write the file');
+    expect(finalAttributes['gen_ai.prompt.1.tool_calls']).toContain('write');
+    expect(finalAttributes['gen_ai.prompt.2.tool_call_id']).toBe('call-1');
+    expect(finalAttributes['gen_ai.completion.0.content']).toBe('done writing');
+    expect(finalAttributes['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
-  it('assigns per-phase usage from deferred assistant messages', () => {
+  it('uses per-assistant transcript usage for reconstructed tool-turn chat spans', () => {
     seedSessionWithLlm('sess-1', 'run-1');
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('expected session');
@@ -362,7 +381,7 @@ describe('handleLlmOutput', () => {
       event: {
         success: true,
         messages: [
-          { role: 'user', content: '请读取并总结' },
+          { role: 'user', content: 'read and summarize' },
           {
             role: 'assistant',
             content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: '/tmp/a' } }],
@@ -372,11 +391,11 @@ describe('handleLlmOutput', () => {
             role: 'toolResult',
             toolCallId: 'call-1',
             toolName: 'read',
-            content: [{ type: 'text', text: '读取成功' }],
+            content: [{ type: 'text', text: 'read succeeded' }],
           },
           {
             role: 'assistant',
-            content: [{ type: 'text', text: '<final>总结完成</final>' }],
+            content: [{ type: 'text', text: '<final>summary done</final>' }],
             usage: { input: 80, output: 20, cacheRead: 5 },
           },
         ],
@@ -394,7 +413,7 @@ describe('handleLlmOutput', () => {
         startTime: Date.now(),
         endTime: Date.now() + 20,
         params: { path: '/tmp/a' },
-        result: '读取成功',
+        result: 'read succeeded',
       },
     ];
     spanStore.setLlmSpan('sess-1', 'run-1', {
@@ -404,14 +423,14 @@ describe('handleLlmOutput', () => {
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now() - 20,
-      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: '请读取并总结' }] }],
+      inputMessages: [{ role: 'user', parts: [{ type: 'text', content: 'read and summarize' }] }],
       systemInstructions: [],
     });
 
     handleLlmOutput(
       {
         ...baseEvent,
-        lastAssistant: { role: 'assistant', content: '总结完成' },
+        lastAssistant: { role: 'assistant', content: 'summary done' },
         finishReason: 'stop',
       },
       baseCtx,
@@ -419,14 +438,14 @@ describe('handleLlmOutput', () => {
     );
 
     expect(createdSpans).toHaveLength(2);
-    const firstPhaseAttributes = createdSpans[0].options.attributes as Record<string, number | string[]>;
-    const secondPhaseAttributes = createdSpans[1].options.attributes as Record<string, number | string[]>;
-    expect(firstPhaseAttributes['gen_ai.usage.input_tokens']).toBe(120);
-    expect(firstPhaseAttributes['gen_ai.usage.output_tokens']).toBe(30);
-    expect(firstPhaseAttributes['openclaw.usage.cache_read_tokens']).toBe(10);
-    expect(secondPhaseAttributes['gen_ai.usage.input_tokens']).toBe(80);
-    expect(secondPhaseAttributes['gen_ai.usage.output_tokens']).toBe(20);
-    expect(secondPhaseAttributes['openclaw.usage.cache_read_tokens']).toBe(5);
+    const firstSpanAttributes = createdSpans[0].options.attributes as Record<string, number | string>;
+    expect(firstSpanAttributes['gen_ai.usage.input_tokens']).toBe(120);
+    expect(firstSpanAttributes['gen_ai.usage.output_tokens']).toBe(30);
+    expect(firstSpanAttributes['openclaw.usage.cache_read_tokens']).toBe(10);
+    const finalSpanAttributes = createdSpans[1].options.attributes as Record<string, number | string>;
+    expect(finalSpanAttributes['gen_ai.usage.input_tokens']).toBe(80);
+    expect(finalSpanAttributes['gen_ai.usage.output_tokens']).toBe(20);
+    expect(finalSpanAttributes['openclaw.usage.cache_read_tokens']).toBe(5);
   });
 
   it('omits duplicated system messages from child chat input when system instructions exist', () => {
@@ -439,10 +458,10 @@ describe('handleLlmOutput', () => {
       model: 'claude-sonnet-4-5-20250929',
       startTime: Date.now() - 20,
       inputMessages: [
-        { role: 'system', parts: [{ type: 'text', content: '系统提示词' }] },
-        { role: 'user', parts: [{ type: 'text', content: '你好' }] },
+        { role: 'system', parts: [{ type: 'text', content: 'system instructions' }] },
+        { role: 'user', parts: [{ type: 'text', content: 'hello' }] },
       ],
-      systemInstructions: [{ type: 'text', content: '系统提示词' }],
+      systemInstructions: [{ type: 'text', content: 'system instructions' }],
     });
 
     handleLlmOutput(
@@ -456,7 +475,7 @@ describe('handleLlmOutput', () => {
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
-    expect(spanAttributes['gen_ai.system_instructions']).toContain('系统提示词');
+    expect(spanAttributes['gen_ai.system_instructions']).toContain('system instructions');
     expect(spanAttributes['gen_ai.input.messages']).not.toContain('"role":"system"');
     expect(spanAttributes['gen_ai.input.messages']).toContain('"role":"user"');
   });
@@ -529,7 +548,7 @@ describe('handleLlmOutput', () => {
     expect(createdSpans).toHaveLength(0);
   });
 
-  it('handles missing LLM metadata gracefully while still accumulating tokens', () => {
+  it('emits a best-effort chat span when llm_input metadata is missing', () => {
     const agentSpan = mockSpan();
     spanStore.set('sess-1', {
       agentSpan,
@@ -546,12 +565,17 @@ describe('handleLlmOutput', () => {
       initialHistoryMessages: [],
     });
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
     expect(session.tokens.output).toBe(50);
-    expect(createdSpans).toHaveLength(0);
+    expect(createdSpans).toHaveLength(1);
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string | number>;
+    expect(spanAttributes['openclaw.llm.run_id']).toBe('run-1');
+    expect(spanAttributes['gen_ai.completion.0.content']).toBe('Hello!');
+    expect(spanAttributes['gen_ai.usage.input_tokens']).toBe(100);
+    expect(spanAttributes['gen_ai.usage.output_tokens']).toBe(50);
   });
 
   it('finalizes deferred agent_end when the last llm_output arrives', () => {

@@ -115,59 +115,11 @@ describe('handleAgentEnd', () => {
     expect(agentSpan.setAttribute).toHaveBeenCalledWith('error.type', 'ToolError');
   });
 
-  it('sets cumulative token attributes on agent span', () => {
+  it('does not write request-log aggregate data on the agent span', () => {
     const agentSpan = seedSession('sess-1', {
       tokens: { input: 1000, output: 500, cacheRead: 2000, cacheWrite: 800 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.input_tokens', 1000);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.output_tokens', 500);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_read_tokens', 2000);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_write_tokens', 800);
-  });
-
-  it('omits token attributes when tokens are zero', () => {
-    const agentSpan = seedSession('sess-1');
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasInputTokens = calls.some((call) => call[0] === 'gen_ai.usage.input_tokens');
-    expect(hasInputTokens).toBe(false);
-  });
-
-  it('omits cache token attributes when cache tokens are zero', () => {
-    const agentSpan = seedSession('sess-1', {
-      tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasCacheRead = calls.some((call) => call[0] === 'openclaw.usage.cache_read_tokens');
-    expect(hasCacheRead).toBe(false);
-  });
-
-  it('sets model and provider from session on agent span', () => {
-    const agentSpan = seedSession('sess-1', {
       model: 'claude-sonnet-4-5-20250929',
       provider: 'anthropic',
-      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.request.model', 'claude-sonnet-4-5-20250929');
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.response.model', 'claude-sonnet-4-5-20250929');
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.provider.name', 'anthropic');
-  });
-
-  it('writes final output and system instructions on root span', () => {
-    const agentSpan = seedSession('sess-1', {
-      model: 'claude-sonnet-4-5-20250929',
-      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     });
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('session should exist');
@@ -186,42 +138,19 @@ describe('handleAgentEnd', () => {
 
     handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
 
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+    const aggregateAttributes = new Set([
+      'gen_ai.usage.input_tokens',
+      'gen_ai.usage.output_tokens',
+      'openclaw.usage.cache_read_tokens',
+      'openclaw.usage.cache_write_tokens',
+      'gen_ai.request.model',
+      'gen_ai.response.model',
+      'model_name',
       'gen_ai.output.text',
-      'Final answer',
-    );
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
       'gen_ai.system_instructions',
-      expect.stringContaining('"System prompt"'),
-    );
-  });
-
-  it('extracts final output from agent_end messages when session cache is stale', () => {
-    const agentSpan = seedSession('sess-1');
-    const event: AgentEndEvent = {
-      success: true,
-      messages: [
-        { role: 'user', content: '请帮我写入' },
-        {
-          role: 'assistant',
-          content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } }],
-        },
-        {
-          role: 'toolResult',
-          toolCallId: 'call-1',
-          toolName: 'write',
-          content: [{ type: 'text', text: '写入成功' }],
-        },
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: '<final>已经写好啦</final>' }],
-        },
-      ],
-    };
-
-    handleAgentEnd(event, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.output.text', '已经写好啦');
+    ]);
+    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((call) => aggregateAttributes.has(call[0]))).toBe(false);
   });
 
   it('sets duration and tool count attributes', () => {

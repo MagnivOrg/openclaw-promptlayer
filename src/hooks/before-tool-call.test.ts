@@ -44,9 +44,10 @@ vi.mock('../otel.js', () => ({
 }));
 
 function seedSession(sessionKey: string) {
+  const agentCtx = mockContext();
   spanStore.set(sessionKey, {
     agentSpan: mockSpan(),
-    agentCtx: mockContext(),
+    agentCtx,
     toolStack: [],
     llmSpans: new Map(),
     completedToolCalls: [],
@@ -58,6 +59,7 @@ function seedSession(sessionKey: string) {
     latestSystemInstructions: [],
     initialHistoryMessages: [],
   });
+  return { agentCtx };
 }
 
 describe('handleBeforeToolCall', () => {
@@ -84,7 +86,7 @@ describe('handleBeforeToolCall', () => {
   };
 
   it('creates a tool span with correct name and attributes', () => {
-    seedSession('sess-1');
+    const { agentCtx } = seedSession('sess-1');
 
     handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
 
@@ -99,8 +101,16 @@ describe('handleBeforeToolCall', () => {
           'gen_ai.tool.type': 'function',
         }),
       }),
-      expect.anything(),
+      agentCtx,
     ]);
+  });
+
+  it('parents tool spans directly under the session root context', () => {
+    const { agentCtx } = seedSession('sess-1');
+
+    handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
+
+    expect(mockTracerInstance.startSpan.mock.calls.at(-1)?.[2]).toBe(agentCtx);
   });
 
   it('uses OpenClaw toolCallId when provided', () => {

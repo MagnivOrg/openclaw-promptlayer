@@ -159,12 +159,12 @@ describe('normalizeToGenAiOutputMessages', () => {
       role: 'assistant',
       content: [
         { type: 'thinking', thinking: 'step 1\nstep 2' },
-        { type: 'text', text: '<final>\n你好呀\n</final>' },
+        { type: 'text', text: '<final>\nhello there\n</final>' },
       ],
     });
     expect(out[0].parts).toEqual([
       { type: 'thinking', content: 'step 1\nstep 2' },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 
@@ -174,13 +174,13 @@ describe('normalizeToGenAiOutputMessages', () => {
       content: [
         {
           type: 'text',
-          text: '<think>\n先分析\n</think>\n<final>\n再输出\n</final>',
+          text: '<think>\nanalyze first\n</think>\n<final>\nthen answer\n</final>',
         },
       ],
     });
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先分析' },
-      { type: 'text', content: '再输出' },
+      { type: 'thinking', content: 'analyze first' },
+      { type: 'text', content: 'then answer' },
     ]);
   });
 
@@ -210,19 +210,19 @@ describe('normalizeToGenAiOutputMessages', () => {
     const out = normalizeToGenAiOutputMessages({
       role: 'assistant',
       content:
-        '{"type":"thinking","thinking":"先读文件"}\n' +
+        '{"type":"thinking","thinking":"read file first"}\n' +
         '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
-        '{"type":"text","text":"<final>你好呀</final>"}',
+        '{"type":"text","text":"<final>hello there</final>"}',
     });
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先读文件' },
+      { type: 'thinking', content: 'read file first' },
       {
         type: 'tool_call',
         id: 'read1',
         name: 'read',
         arguments: { file_path: '/tmp/a' },
       },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 
@@ -238,20 +238,20 @@ describe('normalizeToGenAiInputMessages', () => {
       {
         role: 'assistant',
         content:
-          '{"type":"thinking","thinking":"先看上下文"}\n' +
+          '{"type":"thinking","thinking":"check context first"}\n' +
           '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
-          '<final>你好呀</final>',
+          '<final>hello there</final>',
       },
     ]);
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先看上下文' },
+      { type: 'thinking', content: 'check context first' },
       {
         type: 'tool_call',
         id: 'read1',
         name: 'read',
         arguments: { file_path: '/tmp/a' },
       },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 });
@@ -358,7 +358,7 @@ describe('buildMessagesFromConversationHistory', () => {
           role: 'toolResult',
           toolCallId: 'call-2',
           toolName: 'load_skills',
-          content: [{ type: 'text', text: '已加载技能' }],
+          content: [{ type: 'text', text: 'skill loaded' }],
         },
       ]),
     ).toEqual([
@@ -369,7 +369,7 @@ describe('buildMessagesFromConversationHistory', () => {
             type: 'tool_call_response',
             id: 'call-2',
             name: 'load_skills',
-            result: '已加载技能',
+            result: 'skill loaded',
           },
         ],
       },
@@ -380,22 +380,22 @@ describe('buildMessagesFromConversationHistory', () => {
 describe('extractConversationOutputMessages', () => {
   it('extracts only messages produced after current input', () => {
     const fullConversation = [
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
       { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'final response' }] },
     ];
     const inputMessages = [
       { role: 'system', parts: [{ type: 'text', content: 'System' }] },
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
     ];
 
     expect(extractConversationOutputMessages(fullConversation, inputMessages)).toEqual([
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
       { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'final response' }] },
     ]);
   });
 });
@@ -445,10 +445,10 @@ describe('normalizeToGenAiToolDefinitions', () => {
 
 describe('buildAssistantMessagesFromTexts', () => {
   it('builds a fallback assistant message from assistantTexts', () => {
-    expect(buildAssistantMessagesFromTexts(['第一段', '第二段'], 'stop')).toEqual([
+    expect(buildAssistantMessagesFromTexts(['first segment', 'second segment'], 'stop')).toEqual([
       {
         role: 'assistant',
-        parts: [{ type: 'text', content: '第一段\n第二段' }],
+        parts: [{ type: 'text', content: 'first segment\nsecond segment' }],
         finish_reason: 'stop',
       },
     ]);

@@ -6,14 +6,16 @@
  */
 
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore, type LlmSpanEntry } from '../context/span-store.js';
 import {
-  extractErrorDetails,
   buildMessagesFromConversationHistory,
-  extractFinalResult,
+  extractErrorDetails,
+  normalizeToGenAiInputMessages,
+  type GenAiChatMessage,
 } from '../util.js';
 import type { PromptLayerPluginConfig } from '../config.js';
 import type { AgentContext } from './before-agent-start.js';
+import { createChatSpan } from './chat-span.js';
 
 /** OpenClaw agent_end event payload. */
 export interface AgentEndEvent {
@@ -32,6 +34,178 @@ export interface Logger {
 }
 
 const LLM_OUTPUT_WATCHDOG_MS = 10_000;
+const FINAL_CHAT_DURATION_FLOOR_MS = 1;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function hasAssistantText(message: GenAiChatMessage | undefined): boolean {
+  return (
+    message?.role === 'assistant' &&
+    message.parts.some(
+      (part) =>
+        part.type === 'text' &&
+        typeof part.content === 'string' &&
+        part.content.trim() !== '',
+    )
+  );
+}
+
+function unwrapConversationMessages(messages: unknown[] | undefined): Record<string, unknown>[] {
+  if (!Array.isArray(messages)) return [];
+  const out: Record<string, unknown>[] = [];
+  for (const item of messages) {
+    if (!isRecord(item)) continue;
+    const rawMessage = isRecord(item.message) ? item.message : item;
+    if (typeof rawMessage.role !== 'string') continue;
+    out.push(rawMessage);
+  }
+  return out;
+}
+
+function rawMessageTimestamp(raw: Record<string, unknown> | undefined): number | undefined {
+  if (!raw) return undefined;
+  return finiteNumber(raw.timestamp);
+}
+
+function rawAssistantUsage(
+  raw: Record<string, unknown> | undefined,
+): LlmSpanEntry['usage'] | undefined {
+  if (!raw || !isRecord(raw.usage)) return undefined;
+  const usage = raw.usage;
+  const out: NonNullable<LlmSpanEntry['usage']> = {};
+  const input = finiteNumber(usage.input);
+  const output = finiteNumber(usage.output);
+  const cacheRead = finiteNumber(usage.cacheRead);
+  const cacheWrite = finiteNumber(usage.cacheWrite);
+  if (input !== undefined) out.input = input;
+  if (output !== undefined) out.output = output;
+  if (cacheRead !== undefined) out.cacheRead = cacheRead;
+  if (cacheWrite !== undefined) out.cacheWrite = cacheWrite;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function rawFinishReason(raw: Record<string, unknown> | undefined): string | undefined {
+  const stopReason = typeof raw?.stopReason === 'string' ? raw.stopReason : undefined;
+  if (!stopReason) return undefined;
+  if (stopReason === 'toolUse') return 'tool_call';
+  return stopReason;
+}
+
+function findCurrentTurnStart(messages: GenAiChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return index;
+  }
+  return 0;
+}
+
+function emitTranscriptChatSpans(
+  sessionKey: string,
+  session: NonNullable<ReturnType<typeof spanStore.get>>,
+  event: AgentEndEvent,
+  ctx: AgentContext,
+  config: PromptLayerPluginConfig,
+): boolean {
+  const rawMessages = unwrapConversationMessages(event.messages);
+  const fullConversationMessages =
+    rawMessages.length > 0
+      ? normalizeToGenAiInputMessages(rawMessages, { toolResultRole: 'tool' })
+      : buildMessagesFromConversationHistory(event.messages);
+  if (fullConversationMessages.length === 0) return false;
+
+  const currentTurnStart = findCurrentTurnStart(fullConversationMessages);
+  const turnMessages = fullConversationMessages.slice(currentTurnStart);
+  const rawTurnMessages = rawMessages.slice(currentTurnStart);
+  let emitted = false;
+  let previousEndTime = session.startTime;
+
+  for (let index = 0; index < turnMessages.length; index += 1) {
+    const message = turnMessages[index];
+    const raw = rawTurnMessages[index];
+    const messageTime = rawMessageTimestamp(raw);
+    if (message?.role !== 'assistant') {
+      if (messageTime !== undefined) {
+        previousEndTime = Math.max(previousEndTime, messageTime);
+      }
+      continue;
+    }
+
+    const endTime = Math.max(
+      messageTime ?? Date.now(),
+      previousEndTime + FINAL_CHAT_DURATION_FLOOR_MS,
+    );
+    const startTime = Math.max(previousEndTime, endTime - FINAL_CHAT_DURATION_FLOOR_MS);
+    const provider =
+      typeof raw?.provider === 'string'
+        ? raw.provider
+        : session.provider ?? config.providerName ?? 'unknown';
+    const model =
+      typeof raw?.model === 'string'
+        ? raw.model
+        : session.model ?? 'unknown';
+    const responseId = typeof raw?.responseId === 'string' ? raw.responseId : undefined;
+    const llmEntry: LlmSpanEntry = {
+      runId: `${session.lastLlmRunId ?? sessionKey}:message-${currentTurnStart + index}`,
+      sessionKey,
+      agentName: ctx.agentId || 'agent',
+      provider,
+      model,
+      startTime,
+      inputMessages: turnMessages.slice(0, index),
+      systemInstructions: session.latestSystemInstructions ?? [],
+    };
+
+    createChatSpan(
+      llmEntry,
+      llmEntry.inputMessages,
+      [message],
+      session.agentCtx,
+      message.finish_reason ?? rawFinishReason(raw) ?? (hasAssistantText(message) ? 'stop' : undefined),
+      responseId,
+      rawAssistantUsage(raw),
+      endTime,
+      config,
+    );
+    previousEndTime = endTime;
+    emitted = true;
+  }
+
+  if (emitted) {
+    session.latestAllMessages = fullConversationMessages;
+  }
+  return emitted;
+}
+
+function emitLlmOutputFallbackChatSpan(
+  sessionKey: string,
+  session: NonNullable<ReturnType<typeof spanStore.get>>,
+  config: PromptLayerPluginConfig,
+): void {
+  const completed = (session.completedLlmCalls ?? []).at(-1);
+  if (!completed?.outputMessages || completed.outputMessages.length === 0) return;
+  createChatSpan(
+    completed,
+    completed.inputMessages,
+    completed.outputMessages,
+    session.agentCtx,
+    completed.finishReason,
+    completed.responseId,
+    completed.usage,
+    completed.endTime ?? Date.now(),
+    config,
+  );
+  session.latestAllMessages = [
+    ...completed.inputMessages,
+    ...completed.outputMessages,
+  ];
+  session.lastChatEndTime = completed.endTime;
+  session.lastChatHadTextOutput = completed.outputMessages.some(hasAssistantText);
+}
 
 function finalizeAgentEndNow(
   event: AgentEndEvent,
@@ -70,45 +244,8 @@ function finalizeAgentEndNow(
     session.toolSequence,
   );
 
-  // Cumulative token usage from llm_output hooks
-  const { tokens } = session;
-  if (tokens.input > 0 || tokens.output > 0) {
-    session.agentSpan.setAttribute('gen_ai.usage.input_tokens', tokens.input);
-    session.agentSpan.setAttribute('gen_ai.usage.output_tokens', tokens.output);
-    if (tokens.cacheRead > 0) {
-      session.agentSpan.setAttribute('openclaw.usage.cache_read_tokens', tokens.cacheRead);
-    }
-    if (tokens.cacheWrite > 0) {
-      session.agentSpan.setAttribute('openclaw.usage.cache_write_tokens', tokens.cacheWrite);
-    }
-  }
-
-  // Model/provider from LLM hooks (last seen values)
-  if (session.model) {
-    session.agentSpan.setAttribute('gen_ai.request.model', session.model);
-    session.agentSpan.setAttribute('gen_ai.response.model', session.model);
-    session.agentSpan.setAttribute('model_name', session.model);
-  }
-  if (session.provider) {
-    session.agentSpan.setAttribute('gen_ai.provider.name', session.provider);
-  }
-
-  const fullConversationMessages = buildMessagesFromConversationHistory(event.messages);
-  if (fullConversationMessages.length > 0) {
-    session.latestAllMessages = fullConversationMessages;
-  }
-
-  if (session.latestAllMessages && session.latestAllMessages.length > 0) {
-    const finalResult = extractFinalResult(session.latestAllMessages);
-    if (finalResult) {
-      session.agentSpan.setAttribute('gen_ai.output.text', finalResult);
-    }
-  }
-  if (session.latestSystemInstructions && session.latestSystemInstructions.length > 0) {
-    session.agentSpan.setAttribute(
-      'gen_ai.system_instructions',
-      JSON.stringify(session.latestSystemInstructions),
-    );
+  if (!emitTranscriptChatSpans(sessionKey, session, event, ctx, config)) {
+    emitLlmOutputFallbackChatSpan(sessionKey, session, config);
   }
 
   // Error status
@@ -145,7 +282,6 @@ function finalizeAgentEndNow(
     session.agentSpan.setStatus({ code: SpanStatusCode.OK });
   }
 
-  // End the agent span
   session.agentSpan.end();
 
   spanStore.delete(sessionKey);

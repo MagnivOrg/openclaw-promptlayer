@@ -83,27 +83,28 @@ export function handleLlmInput(
   const hasRawHistoryMessages =
     Array.isArray(event.historyMessages) && event.historyMessages.length > 0;
 
-  // 完整 gen_ai.input.messages（system + 历史 + 当前用户轮）保留多轮/工具/思考结构。
+  // By default, capture only this turn's prompt. Full history can be very large
+  // and is opt-in via captureHistoryMessages.
   let fullInput: ReturnType<typeof buildFullInputMessages> = [];
   if (config.captureMessageContent || config.captureHistoryMessages) {
-    if (hasRawHistoryMessages) {
+    if (config.captureHistoryMessages && hasRawHistoryMessages) {
       fullInput = buildFullInputMessages(
         event.systemPrompt,
         event.historyMessages,
         event.prompt,
       );
     } else {
-      const normalizedSessionHistory = session.initialHistoryMessages ?? [];
-      const hasSystemMessageInHistory = normalizedSessionHistory.some(
+      const initialHistoryMessages = config.captureHistoryMessages
+        ? session.initialHistoryMessages ?? []
+        : [];
+      const hasSystemMessageInHistory = initialHistoryMessages.some(
         (message) => message.role === 'system',
       );
       fullInput = [
-        ...(hasSystemMessageInHistory
-          ? []
-          : systemInstructions.length > 0
-            ? [{ role: 'system', parts: systemInstructions }]
-            : []),
-        ...normalizedSessionHistory,
+        ...(!hasSystemMessageInHistory && systemInstructions.length > 0
+          ? [{ role: 'system', parts: systemInstructions }]
+          : []),
+        ...initialHistoryMessages,
         {
           role: 'user',
           parts: [{ type: 'text', content: event.prompt }],

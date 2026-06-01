@@ -81,12 +81,12 @@ export function handleBeforeAgentStart(
   );
 
   const agentCtx = trace.setSpan(context.active(), agentSpan);
-
   const session: SessionSpanContext = {
     agentSpan,
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+    completedLlmCalls: [],
     completedToolCalls: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,

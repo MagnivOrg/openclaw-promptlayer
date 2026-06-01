@@ -36,6 +36,17 @@ export interface LlmSpanEntry {
   systemInstructions: SystemInstructionPart[];
   /** Tool definitions available to this LLM call. */
   toolDefinitions?: GenAiToolDefinition[];
+  /** Output observed by llm_output; emitted at agent_end to avoid whole-turn pairing. */
+  outputMessages?: GenAiChatMessage[];
+  finishReason?: string;
+  responseId?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+  endTime?: number;
 }
 
 export interface CompletedToolCall {
@@ -66,6 +77,9 @@ export interface SessionSpanContext {
   /** Pending LLM call spans indexed by runId */
   llmSpans: Map<string, LlmSpanEntry>;
 
+  /** Completed LLM hook payloads waiting to be reconciled at agent_end. */
+  completedLlmCalls: LlmSpanEntry[];
+
   /** 已完成的工具调用记录，供 llm_output 阶段化重建 chat spans。 */
   completedToolCalls: CompletedToolCall[];
 
@@ -89,6 +103,15 @@ export interface SessionSpanContext {
 
   /** 当前会话最后一轮 system instructions。 */
   latestSystemInstructions?: SystemInstructionPart[];
+
+  /** Last emitted chat span end time, used to sequence reconstructed final calls. */
+  lastChatEndTime?: number;
+
+  /** Whether the last emitted chat span contained final assistant text. */
+  lastChatHadTextOutput?: boolean;
+
+  /** Whether the last emitted chat span requested tool execution. */
+  lastChatHadToolCall?: boolean;
 
   /** agent_start 阶段拿到的会话历史，作为 llm_input 缺省 history 的兜底。 */
   initialHistoryMessages?: GenAiChatMessage[];
@@ -171,6 +194,15 @@ class SpanStore {
     const entry = session.llmSpans.get(runId);
     if (entry) session.llmSpans.delete(runId);
     return entry;
+  }
+
+  addCompletedLlmCall(sessionKey: string, entry: LlmSpanEntry): void {
+    const session = this.sessions.get(sessionKey);
+    if (!session) return;
+    if (!Array.isArray(session.completedLlmCalls)) {
+      session.completedLlmCalls = [];
+    }
+    session.completedLlmCalls.push(entry);
   }
 
   /** 记录已完成的工具调用，供后续阶段化重建 chat spans。 */
