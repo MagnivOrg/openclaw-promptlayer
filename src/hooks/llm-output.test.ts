@@ -7,10 +7,6 @@ import type { LlmOutputEvent } from './llm-output.js';
 import type { LlmContext } from './llm-input.js';
 import { handleAgentEnd } from './agent-end.js';
 
-vi.mock('../metrics/genai-metrics.js', () => ({
-  recordTokenUsage: vi.fn(),
-}));
-
 const { mockTracerInstance, createdSpans } = vi.hoisted(() => {
   interface MockTestSpan {
     end: ReturnType<typeof vi.fn>;
@@ -67,8 +63,6 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-import { recordTokenUsage } from '../metrics/genai-metrics.js';
-
 function seedSessionWithLlm(sessionKey: string, runId: string) {
   const agentSpan = mockSpan();
   const agentCtx = mockContext();
@@ -91,6 +85,7 @@ function seedSessionWithLlm(sessionKey: string, runId: string) {
 
   spanStore.setLlmSpan(sessionKey, runId, {
     runId,
+    sessionKey,
     agentName: 'my-agent',
     provider: 'anthropic',
     model: 'claude-sonnet-4-5-20250929',
@@ -153,6 +148,7 @@ describe('handleLlmOutput', () => {
 
     spanStore.setLlmSpan('sess-1', 'run-2', {
       runId: 'run-2',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
@@ -206,37 +202,6 @@ describe('handleLlmOutput', () => {
     expect(spanStore.getLlmSpan('sess-1', 'run-1')).toBeUndefined();
   });
 
-  it('records token metrics when enableMetrics is true', () => {
-    seedSessionWithLlm('sess-1', 'run-1');
-
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ enableMetrics: true }));
-
-    expect(recordTokenUsage).toHaveBeenCalledWith(
-      100,
-      'input',
-      expect.objectContaining({
-        agentName: 'my-agent',
-        providerName: 'anthropic',
-        requestModel: 'claude-sonnet-4-5-20250929',
-      }),
-    );
-    expect(recordTokenUsage).toHaveBeenCalledWith(
-      50,
-      'output',
-      expect.objectContaining({
-        agentName: 'my-agent',
-      }),
-    );
-  });
-
-  it('does not record metrics when enableMetrics is false', () => {
-    seedSessionWithLlm('sess-1', 'run-1');
-
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ enableMetrics: false }));
-
-    expect(recordTokenUsage).not.toHaveBeenCalled();
-  });
-
   it('writes gen_ai.output.messages onto the reconstructed chat span', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
@@ -253,7 +218,6 @@ describe('handleLlmOutput', () => {
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
     expect(spanAttributes['gen_ai.output.messages']).toContain('"type":"text"');
     expect(spanAttributes['gen_ai.response.finish_reasons']).toEqual(['stop']);
-    expect(spanAttributes['logfire.json_schema']).toContain('"gen_ai.output.messages"');
     expect(spanStore.get('sess-1')?.latestAllMessages).toEqual([
       {
         role: 'assistant',
@@ -331,6 +295,7 @@ describe('handleLlmOutput', () => {
     ];
     spanStore.setLlmSpan('sess-1', 'run-1', {
       runId: 'run-1',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
@@ -403,6 +368,7 @@ describe('handleLlmOutput', () => {
     ];
     spanStore.setLlmSpan('sess-1', 'run-1', {
       runId: 'run-1',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
@@ -436,6 +402,7 @@ describe('handleLlmOutput', () => {
     seedSessionWithLlm('sess-1', 'run-1');
     spanStore.setLlmSpan('sess-1', 'run-1', {
       runId: 'run-1',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
@@ -528,7 +495,7 @@ describe('handleLlmOutput', () => {
   it('returns early when no session key exists', () => {
     handleLlmOutput(baseEvent, {}, createTestConfig());
 
-    expect(recordTokenUsage).not.toHaveBeenCalled();
+    expect(createdSpans).toHaveLength(0);
   });
 
   it('handles missing LLM metadata gracefully while still accumulating tokens', () => {

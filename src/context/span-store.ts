@@ -8,7 +8,7 @@
  */
 
 import type { Span, Context } from '@opentelemetry/api';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 import type { Logger, AgentEndEvent } from '../hooks/agent-end.js';
 import type { AgentContext } from '../hooks/before-agent-start.js';
 import type { GenAiChatMessage, SystemInstructionPart } from '../util.js';
@@ -25,6 +25,7 @@ export interface ToolSpanEntry {
 
 export interface LlmSpanEntry {
   runId: string;
+  sessionKey: string;
   agentName: string;
   provider: string;
   model: string;
@@ -117,7 +118,7 @@ export interface SessionSpanContext {
   deferredAgentEnd?: {
     event: AgentEndEvent;
     ctx: AgentContext;
-    config: LogfirePluginConfig;
+    config: PromptLayerPluginConfig;
     logger: Logger;
     requestedAt: number;
   };

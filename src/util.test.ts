@@ -324,7 +324,7 @@ describe('buildPydanticAiAllMessages', () => {
 });
 
 describe('buildMessagesFromConversationHistory', () => {
-  it('keeps tool responses as user messages for pydantic-ai style rendering', () => {
+  it('keeps tool responses as user messages for GenAI message rendering', () => {
     expect(
       buildMessagesFromConversationHistory([
         {

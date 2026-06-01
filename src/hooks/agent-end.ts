@@ -2,23 +2,17 @@
 /**
  * Hook: agent_end
  *
- * Closes the invoke_agent span, records token usage and duration,
- * emits metrics, and logs the Logfire trace link.
+ * Closes the invoke_agent span and records final status, usage, and duration.
  */
 
 import { SpanStatusCode } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
-import { buildLogfireTraceUrl } from '../trace-link.js';
-import { recordOperationDuration } from '../metrics/genai-metrics.js';
 import {
-  extractWorkspaceName,
   extractErrorDetails,
   buildMessagesFromConversationHistory,
   extractFinalResult,
-  LOGFIRE_JSON_SCHEMA_KEY,
-  PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 import type { AgentContext } from './before-agent-start.js';
 
 /** OpenClaw agent_end event payload. */
@@ -42,7 +36,7 @@ const LLM_OUTPUT_WATCHDOG_MS = 10_000;
 function finalizeAgentEndNow(
   event: AgentEndEvent,
   ctx: AgentContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
   logger: Logger,
 ): void {
   const sessionKey =
@@ -60,15 +54,6 @@ function finalizeAgentEndNow(
     typeof event.durationMs === 'number' && Number.isFinite(event.durationMs)
       ? event.durationMs
       : Date.now() - session.startTime;
-  const durationS = durationMs / 1000;
-  const agentName =
-    typeof ctx.agentId === 'string' && ctx.agentId.length > 0
-      ? ctx.agentId
-      : 'agent';
-  const workspace = extractWorkspaceName(
-    typeof ctx.workspaceDir === 'string' ? ctx.workspaceDir : undefined,
-  );
-
   // Close any remaining tool spans (shouldn't happen but safety net)
   // Reverse order: close children before parent (LIFO)
   for (let i = session.toolStack.length - 1; i >= 0; i--) {
@@ -117,27 +102,15 @@ function finalizeAgentEndNow(
   }
 
   if (session.latestAllMessages && session.latestAllMessages.length > 0) {
-    session.agentSpan.setAttribute(
-      'pydantic_ai.all_messages',
-      JSON.stringify(session.latestAllMessages),
-    );
-    session.agentSpan.setAttribute(
-      LOGFIRE_JSON_SCHEMA_KEY,
-      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
-    );
     const finalResult = extractFinalResult(session.latestAllMessages);
     if (finalResult) {
-      session.agentSpan.setAttribute('final_result', finalResult);
+      session.agentSpan.setAttribute('gen_ai.output.text', finalResult);
     }
   }
   if (session.latestSystemInstructions && session.latestSystemInstructions.length > 0) {
     session.agentSpan.setAttribute(
       'gen_ai.system_instructions',
       JSON.stringify(session.latestSystemInstructions),
-    );
-    session.agentSpan.setAttribute(
-      LOGFIRE_JSON_SCHEMA_KEY,
-      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
     );
   }
 
@@ -178,31 +151,6 @@ function finalizeAgentEndNow(
   // End the agent span
   session.agentSpan.end();
 
-  // Record metrics
-  if (config.enableMetrics) {
-    const metricAttrs = {
-      agentName,
-      workspace,
-      providerName: session.provider || config.providerName || 'unknown',
-      requestModel: session.model || '',
-      responseModel: session.model || '',
-      hasError: !!(event.error || !event.success || session.hasError),
-      errorType: event.error
-        ? 'AgentError'
-        : undefined,
-    };
-
-    recordOperationDuration(durationS, metricAttrs);
-  }
-
-  // Log trace link
-  if (config.enableTraceLinks && config.projectUrl) {
-    const traceId = session.agentSpan.spanContext().traceId;
-    const url = buildLogfireTraceUrl(config.projectUrl, traceId);
-    logger.info(`Logfire trace: ${url}`);
-  }
-
-  // Cleanup
   spanStore.delete(sessionKey);
 }
 
@@ -230,7 +178,7 @@ function forceFinalizeDeferredAgentEnd(sessionKey: string): boolean {
 export function handleAgentEnd(
   event: AgentEndEvent,
   ctx: AgentContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
   logger: Logger,
 ): void {
   const sessionKey =

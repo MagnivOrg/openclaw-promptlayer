@@ -54,12 +54,6 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-vi.mock('../context/propagation.js', () => ({
-  injectTraceContext: vi.fn(),
-}));
-
-import { injectTraceContext } from '../context/propagation.js';
-
 function seedSession(sessionKey: string) {
   spanStore.set(sessionKey, {
     agentSpan: mockSpan(),
@@ -191,8 +185,6 @@ describe('handleBeforeToolCall', () => {
       expect.objectContaining({
         attributes: expect.objectContaining({
           'gen_ai.tool.call.arguments': expect.any(String),
-          tool_arguments: expect.any(String),
-          'logfire.json_schema': expect.stringContaining('"tool_arguments"'),
         }),
       }),
       expect.anything(),
@@ -210,34 +202,6 @@ describe('handleBeforeToolCall', () => {
     expect(lastCall).toBeDefined();
     const attrs = lastCall![1].attributes;
     expect(attrs).not.toHaveProperty('gen_ai.tool.call.arguments');
-  });
-
-  it('injects distributed tracing context when enabled', () => {
-    seedSession('sess-1');
-    const config = createTestConfig({
-      distributedTracing: {
-        enabled: true,
-        injectIntoCommands: true,
-        extractFromWebhooks: true,
-        urlPatterns: ['*'],
-      },
-    });
-
-    handleBeforeToolCall(baseEvent, baseCtx, config);
-
-    expect(injectTraceContext).toHaveBeenCalledWith(
-      baseEvent,
-      mockToolSpan,
-      ['*'],
-    );
-  });
-
-  it('does not inject tracing when distributed tracing is disabled', () => {
-    seedSession('sess-1');
-
-    handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
-
-    expect(injectTraceContext).not.toHaveBeenCalled();
   });
 
   it('returns early when sessionKey is missing', () => {
@@ -284,7 +248,6 @@ describe('handleBeforeToolCall', () => {
       expect.objectContaining({
         attributes: expect.objectContaining({
           tools: ['Read'],
-          'logfire.msg': 'running 1 tool',
         }),
       }),
       expect.anything(),

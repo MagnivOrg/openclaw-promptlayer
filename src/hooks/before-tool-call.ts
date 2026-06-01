@@ -3,21 +3,17 @@
  * Hook: before_tool_call
  *
  * Creates an `execute_tool` child span for each tool invocation,
- * following OTEL GenAI semantic conventions.  Optionally injects
- * W3C traceparent into HTTP commands for distributed tracing.
+ * following OTEL GenAI semantic conventions.
  */
 
 import { trace, SpanKind } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
 import {
-  LOGFIRE_JSON_SCHEMA_KEY,
-  LOGFIRE_PYDANTIC_AI_SCOPE_NAME,
-  TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING,
+  INSTRUMENTATION_SCOPE_NAME,
   prepareForCapture,
   generateCallId,
 } from '../util.js';
-import { injectTraceContext } from '../context/propagation.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 
 const TOOL_SPAN_DURATION_FLOOR_MS = 1;
 const TOOL_GROUP_LEAD_MS = 2;
@@ -42,7 +38,7 @@ export interface ToolContext {
 export function handleBeforeToolCall(
   event: BeforeToolCallEvent,
   ctx: ToolContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey =
     typeof ctx.sessionKey === 'string' && ctx.sessionKey.length > 0
@@ -52,7 +48,7 @@ export function handleBeforeToolCall(
   const session = spanStore.get(sessionKey);
   if (!session) return;
 
-  const tracer = trace.getTracer(LOGFIRE_PYDANTIC_AI_SCOPE_NAME, '1.0.0');
+  const tracer = trace.getTracer(INSTRUMENTATION_SCOPE_NAME, '1.0.0');
   const toolName =
     typeof ctx.toolName === 'string' && ctx.toolName.length > 0
       ? ctx.toolName
@@ -100,12 +96,6 @@ export function handleBeforeToolCall(
           : `running ${existingToolGroup.toolNames.length} tools`,
       );
       existingToolGroup.span.setAttribute('tools', existingToolGroup.toolNames);
-      existingToolGroup.span.setAttribute(
-        'logfire.msg',
-        existingToolGroup.toolNames.length === 1
-          ? 'running 1 tool'
-          : `running ${existingToolGroup.toolNames.length} tools`,
-      );
       toolParentCtx = existingToolGroup.ctx;
     } else {
       const toolGroupName = 'running 1 tool';
@@ -115,8 +105,6 @@ export function handleBeforeToolCall(
           kind: SpanKind.INTERNAL,
           attributes: {
             tools: [toolName],
-            'logfire.msg': toolGroupName,
-            'logfire.span_type': 'span',
           },
           startTime: toolGroupStartTime,
         },
@@ -143,8 +131,6 @@ export function handleBeforeToolCall(
     'gen_ai.tool.name': toolName,
     'gen_ai.tool.call.id': callId,
     'gen_ai.tool.type': 'function',
-    'logfire.msg': `running tool: ${toolName}`,
-    'logfire.span_type': 'span',
     'openclaw.tool.sequence': session.toolSequence,
   };
 
@@ -156,8 +142,6 @@ export function handleBeforeToolCall(
       config.redactSecrets,
     );
     attributes['gen_ai.tool.call.arguments'] = serializedArguments;
-    attributes.tool_arguments = serializedArguments;
-    attributes[LOGFIRE_JSON_SCHEMA_KEY] = TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING;
   }
 
   const toolSpan = tracer.startSpan(
@@ -177,13 +161,4 @@ export function handleBeforeToolCall(
     params: event.params,
     startTime: toolStartTime,
   });
-
-  // Distributed tracing: inject traceparent into HTTP calls
-  if (
-    config.distributedTracing.enabled &&
-    config.distributedTracing.injectIntoCommands &&
-    event.params !== undefined
-  ) {
-    injectTraceContext(event, toolSpan, config.distributedTracing.urlPatterns);
-  }
 }

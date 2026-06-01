@@ -1,17 +1,16 @@
 {
-  "name": "@shichen335/openclaw-logfire",
+  "name": "@shichen335/openclaw-promptlayer",
   "version": "1.0.0",
-  "description": "Pydantic Logfire observability plugin for OpenClaw — OTEL GenAI semantic conventions, distributed tracing, token metrics, trace links",
+  "description": "PromptLayer observability plugin for OpenClaw using vanilla OTEL GenAI spans",
   "license": "MIT",
   "author": "shichen335",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chenbaiyujason/openclaw-logfire.git"
+    "url": "git+https://github.com/chenbaiyujason/openclaw-promptlayer.git"
   },
   "keywords": [
     "openclaw",
-    "logfire",
-    "pydantic",
+    "promptlayer",
     "opentelemetry",
     "otel",
     "observability",
@@ -37,9 +36,9 @@
     "LICENSE",
     "CHANGELOG.md"
   ],
-  "homepage": "https://github.com/chenbaiyujason/openclaw-logfire#readme",
+  "homepage": "https://github.com/chenbaiyujason/openclaw-promptlayer#readme",
   "bugs": {
-    "url": "https://github.com/chenbaiyujason/openclaw-logfire/issues"
+    "url": "https://github.com/chenbaiyujason/openclaw-promptlayer/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -61,15 +60,11 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^2.5.0",
-    "@opentelemetry/exporter-metrics-otlp-proto": "^0.212.0",
     "@opentelemetry/exporter-trace-otlp-proto": "^0.212.0",
     "@opentelemetry/resources": "^2.5.0",
-    "@opentelemetry/sdk-metrics": "^2.5.0",
     "@opentelemetry/sdk-node": "^0.212.0",
     "@opentelemetry/sdk-trace-base": "^2.5.0",
-    "@opentelemetry/semantic-conventions": "^1.30.0",
-    "picomatch": "^4.0.0"
+    "@opentelemetry/semantic-conventions": "^1.30.0"
   },
   "peerDependencies": {
     "openclaw": ">=2026.2.1"
@@ -82,7 +77,6 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.15.0",
-    "@types/picomatch": "^4.0.2",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^10.0.0",
     "typescript": "^5.7.0",

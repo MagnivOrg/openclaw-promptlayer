@@ -71,7 +71,7 @@ export function prepareForCapture(
 }
 
 /**
- * Resolve OpenClaw provider id to OTel/Logfire gen_ai.provider.name.
+ * Resolve OpenClaw provider id to OTel gen_ai.provider.name.
  * If providerNameMap[provider] exists (e.g. gmn -> openai), use it; otherwise return provider.
  */
 export function resolveProviderName(
@@ -137,11 +137,6 @@ export interface SystemInstructionPart {
   content: string;
 }
 
-/** JSON schema property 定义。 */
-export interface JsonSchemaProperty {
-  type?: 'array' | 'object' | 'string' | 'number' | 'boolean';
-}
-
 /** 输入消息规范化选项。 */
 export interface NormalizeInputMessagesOptions {
   toolResultRole?: 'tool' | 'user';
@@ -149,7 +144,7 @@ export interface NormalizeInputMessagesOptions {
 
 /**
  * Normalize OpenClaw/OpenAI-style message list to OTel GenAI gen_ai.input.messages format
- * (Input messages JSON schema) for Logfire LLM Panels (multi-turn + tool call/response).
+ * (Input messages JSON schema) for GenAI semantic convention attributes.
  * @see https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-input-messages.json
  */
 export function normalizeToGenAiInputMessages(
@@ -277,7 +272,7 @@ export function normalizeToGenAiInputMessages(
 /**
  * 将 OpenClaw/OpenAI/Anthropic 样式的单条 assistant 消息转为 OTel GenAI gen_ai.output.messages 格式。
  * 支持：content 字符串、content 数组（text / tool_use / reasoning）、tool_calls。
- * Logfire 据此正确解析多轮、工具调用、思考内容为富文本。
+ * This preserves multi-turn, tool-call, and reasoning structure.
  */
 function appendTaggedOutputParts(parts: GenAiMessagePart[], rawText: string): void {
   if (rawText === '') return;
@@ -332,29 +327,6 @@ function appendOutputPartsFromString(parts: GenAiMessagePart[], rawText: string)
   }
 
   flushPlainTextBuffer();
-}
-
-function parseOpenClawJsonlContent(rawText: string): unknown[] | null {
-  const trimmed = rawText.trim();
-  if (trimmed === '') return null;
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
-
-  const lines = trimmed
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '');
-
-  if (lines.length === 0) return null;
-
-  const parsed: unknown[] = [];
-  for (const line of lines) {
-    try {
-      parsed.push(JSON.parse(line) as unknown);
-    } catch {
-      return null;
-    }
-  }
-  return parsed;
 }
 
 function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): void {
@@ -458,9 +430,9 @@ export function normalizeToGenAiOutputMessages(
 }
 
 /**
- * 构建单次 LLM 调用的完整 gen_ai.input.messages（OTel/Logfire 语义）：
+ * 构建单次 LLM 调用的完整 gen_ai.input.messages（OTel GenAI 语义）：
  * 可选的 system + historyMessages 规范化 + 当前轮用户消息（prompt）。
- * 这样 Logfire 能正确解析多轮对话、工具调用、思考等为富文本。
+ * 保留多轮对话、工具调用、思考等结构。
  */
 export function buildFullInputMessages(
   systemPrompt: string | undefined,
@@ -489,7 +461,7 @@ export function buildFullInputMessages(
   return out;
 }
 
-/** 将 system prompt 规范化为可供 Logfire 解析的数组。 */
+/** 将 system prompt 规范化为 GenAI message parts。 */
 export function buildSystemInstructions(
   systemPrompt: string | undefined,
 ): SystemInstructionPart[] {
@@ -583,51 +555,7 @@ export function extractFinalResult(
   return undefined;
 }
 
-/**
- * Logfire 用此 attribute 的 JSON schema 声明各 attribute 的类型；
- * 声明为 array 后，后端会把 JSON 字符串解析为数组再展示（LLM 面板等）。
- * @see https://github.com/pydantic/logfire
- */
-export const LOGFIRE_JSON_SCHEMA_KEY = 'logfire.json_schema';
-
-/**
- * 与官方 opentelemetry-instrumentation-google-genai 一致的 instrumentation scope 名称。
- * 使用此 scope 时，Logfire 后端会按 Google Gen AI 方式解析并展示 LLM 富文本面板。
- * @see https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/instrumentation-genai/opentelemetry-instrumentation-google-genai/src/opentelemetry/instrumentation/google_genai/otel_wrapper.py
- */
-export const LOGFIRE_GENAI_COMPAT_SCOPE_NAME = 'opentelemetry.instrumentation.google_genai';
-
-/** 与官方 Pydantic AI span 一致的 instrumentation scope 名称。 */
-export const LOGFIRE_PYDANTIC_AI_SCOPE_NAME = 'pydantic-ai';
-
-/** 将 schema properties 包装成 Logfire 期望的 JSON schema。 */
-export function buildLogfireJsonSchema(
-  properties: Record<string, JsonSchemaProperty>,
-): string {
-  return JSON.stringify({
-    type: 'object',
-    properties,
-  });
-}
-
-/** chat span 的消息属性 schema。 */
-export const GEN_AI_CHAT_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  'gen_ai.input.messages': { type: 'array' },
-  'gen_ai.output.messages': { type: 'array' },
-  'gen_ai.system_instructions': { type: 'array' },
-});
-
-/** 根 agent span 的 pydantic-ai 属性 schema。 */
-export const PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  'pydantic_ai.all_messages': { type: 'array' },
-  'gen_ai.system_instructions': { type: 'array' },
-});
-
-/** tool span 的结构化参数/结果 schema。 */
-export const TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  tool_arguments: { type: 'object' },
-  tool_response: { type: 'object' },
-});
+export const INSTRUMENTATION_SCOPE_NAME = 'openclaw-promptlayer';
 
 /**
  * Extract workspace name from a workspace directory path.

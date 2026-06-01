@@ -14,7 +14,7 @@ import {
   buildSystemInstructions,
   resolveProviderName,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 
 /** OpenClaw llm_input event payload (minimal — only fields we use). */
 export interface LlmInputEvent {
@@ -40,7 +40,7 @@ export interface LlmContext {
 export function handleLlmInput(
   event: LlmInputEvent,
   ctx: LlmContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
@@ -72,7 +72,7 @@ export function handleLlmInput(
   const hasRawHistoryMessages =
     Array.isArray(event.historyMessages) && event.historyMessages.length > 0;
 
-  // 完整 gen_ai.input.messages（system + 历史 + 当前用户轮）供 Logfire 正确解析多轮/工具/思考
+  // 完整 gen_ai.input.messages（system + 历史 + 当前用户轮）保留多轮/工具/思考结构。
   let fullInput: ReturnType<typeof buildFullInputMessages> = [];
   if (config.captureMessageContent || config.captureHistoryMessages) {
     if (hasRawHistoryMessages) {
@@ -103,6 +103,7 @@ export function handleLlmInput(
 
   spanStore.setLlmSpan(sessionKey, event.runId, {
     runId: event.runId,
+    sessionKey,
     agentName: ctx.agentId || 'agent',
     provider: resolvedProvider,
     model: event.model,

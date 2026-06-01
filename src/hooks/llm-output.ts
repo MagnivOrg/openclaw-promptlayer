@@ -3,16 +3,13 @@
  * Hook: llm_output
  *
  * Fires after each LLM API call with the response and token usage.
- * Closes the per-LLM-call span, records token metrics, accumulates
- * tokens on the session, and optionally emits inference detail events.
+ * Reconstructs chat spans after each LLM call and accumulates token usage.
  */
 
 import { trace, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { spanStore, type CompletedToolCall, type LlmSpanEntry } from '../context/span-store.js';
 import { maybeFinalizeDeferredAgentEnd } from './agent-end.js';
-import { recordTokenUsage, type MetricAttributes } from '../metrics/genai-metrics.js';
 import {
-  extractWorkspaceName,
   resolveProviderName,
   resolveGenAiSystemName,
   prepareForCapture,
@@ -24,13 +21,9 @@ import {
   normalizeToGenAiOutputMessages,
   type GenAiChatMessage,
   safeJsonStringify,
-  truncate,
-  redactSecrets,
-  LOGFIRE_JSON_SCHEMA_KEY,
-  GEN_AI_CHAT_ATTRIBUTES_SCHEMA_STRING,
-  LOGFIRE_PYDANTIC_AI_SCOPE_NAME,
+  INSTRUMENTATION_SCOPE_NAME,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 import type { LlmContext } from './llm-input.js';
 
 const CHAT_TOOL_BOUNDARY_GAP_MS = 1;
@@ -324,19 +317,20 @@ function createChatSpan(
   phaseUsage: LlmOutputEvent['usage'] | undefined,
   fallbackUsage: LlmOutputEvent['usage'],
   isLastPhase: boolean,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
-  const tracer = trace.getTracer(LOGFIRE_PYDANTIC_AI_SCOPE_NAME, '1.0.0');
+  const tracer = trace.getTracer(INSTRUMENTATION_SCOPE_NAME, '1.0.0');
   const spanName = `chat ${llmEntry.model || llmEntry.provider || 'unknown'}`;
+  const conversationId = llmEntry.sessionKey || 'unknown';
   const attributes: Record<string, string | number | string[]> = {
     'gen_ai.operation.name': 'chat',
     'gen_ai.agent.name': llmEntry.agentName,
+    'gen_ai.conversation.id': conversationId,
     'gen_ai.system': resolveGenAiSystemName(llmEntry.provider, llmEntry.model),
     'gen_ai.request.model': llmEntry.model,
     'gen_ai.provider.name': llmEntry.provider,
     'gen_ai.response.model': llmEntry.model,
-    'logfire.msg': `chat ${llmEntry.model || llmEntry.provider || 'unknown'}`,
-    'logfire.span_type': 'span',
+    'session.id': conversationId,
     'openclaw.llm.run_id': llmEntry.runId,
   };
 
@@ -366,7 +360,6 @@ function createChatSpan(
         config.redactSecrets,
       );
     }
-    attributes[LOGFIRE_JSON_SCHEMA_KEY] = GEN_AI_CHAT_ATTRIBUTES_SCHEMA_STRING;
   }
 
   const phaseHasToolCall = countToolCalls(phase.outputMessages) > 0;
@@ -413,7 +406,7 @@ function createChatSpan(
 export function handleLlmOutput(
   event: LlmOutputEvent,
   ctx: LlmContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
@@ -436,26 +429,6 @@ export function handleLlmOutput(
     if (isFiniteNumber(usage.output)) session.tokens.output += usage.output;
     if (isFiniteNumber(usage.cacheRead)) session.tokens.cacheRead += usage.cacheRead;
     if (isFiniteNumber(usage.cacheWrite)) session.tokens.cacheWrite += usage.cacheWrite;
-  }
-
-  // Record token metrics
-  if (config.enableMetrics && usage) {
-    const agentName = ctx.agentId || 'agent';
-    const workspace = extractWorkspaceName(ctx.workspaceDir);
-    const metricAttrs: MetricAttributes = {
-      agentName,
-      workspace,
-      providerName: resolvedProvider,
-      requestModel: event.model,
-      responseModel: event.model,
-      hasError: false,
-    };
-    if (isFiniteNumber(usage.input) && usage.input > 0) {
-      recordTokenUsage(usage.input, 'input', metricAttrs);
-    }
-    if (isFiniteNumber(usage.output) && usage.output > 0) {
-      recordTokenUsage(usage.output, 'output', metricAttrs);
-    }
   }
 
   // 基于最终完整消息重建 chat 阶段 spans（而不是保留一个覆盖整轮的 chat span）
@@ -511,12 +484,6 @@ export function handleLlmOutput(
           : undefined;
       if (toolGroup) {
         toolGroup.span.setAttribute('tools', toolGroup.toolNames);
-        toolGroup.span.setAttribute(
-          'logfire.msg',
-          toolGroup.toolNames.length === 1
-            ? 'running 1 tool'
-            : `running ${toolGroup.toolNames.length} tools`,
-        );
         toolGroup.span.setStatus({ code: SpanStatusCode.OK });
         toolGroup.span.end(
           Math.max(
@@ -547,7 +514,7 @@ export function handleLlmOutput(
       session.latestSystemInstructions = llmEntry.systemInstructions;
       const finalResult = extractFinalResult(session.latestAllMessages);
       if (finalResult) {
-        session.agentSpan.setAttribute('final_result', finalResult);
+        session.agentSpan.setAttribute('gen_ai.output.text', finalResult);
       }
     } finally {
       maybeFinalizeDeferredAgentEnd(sessionKey);

@@ -12,12 +12,10 @@
 import { SpanStatusCode } from '@opentelemetry/api';
 import { spanStore } from '../context/span-store.js';
 import {
-  LOGFIRE_JSON_SCHEMA_KEY,
-  TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING,
   prepareForCapture,
   safeJsonStringify,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 
 const TOOL_SPAN_DURATION_FLOOR_MS = 1;
 const TOOL_GROUP_TAIL_MS = 2;
@@ -26,12 +24,6 @@ function finalizeToolGroupSpan(sessionKey: string, runId: string, fallbackEndTim
   const toolGroup = spanStore.deleteToolGroup(sessionKey, runId);
   if (!toolGroup) return;
   toolGroup.span.setAttribute('tools', toolGroup.toolNames);
-  toolGroup.span.setAttribute(
-    'logfire.msg',
-    toolGroup.toolNames.length === 1
-      ? 'running 1 tool'
-      : `running ${toolGroup.toolNames.length} tools`,
-  );
   toolGroup.span.setStatus({ code: SpanStatusCode.OK });
   toolGroup.span.end(
     Math.max(
@@ -60,7 +52,7 @@ export interface ToolResultPersistContext {
 export function handleToolResultPersist(
   event: ToolResultPersistEvent,
   ctx: ToolResultPersistContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey =
     typeof ctx.sessionKey === 'string' && ctx.sessionKey.length > 0
@@ -97,8 +89,6 @@ export function handleToolResultPersist(
           'gen_ai.tool.call.result',
           serializedResult,
         );
-        entry.span.setAttribute('tool_response', serializedResult);
-        entry.span.setAttribute(LOGFIRE_JSON_SCHEMA_KEY, TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING);
       }
     }
 

@@ -92,14 +92,6 @@ describe('handleToolResultPersist', () => {
       'gen_ai.tool.call.result',
       expect.any(String),
     );
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'tool_response',
-      expect.any(String),
-    );
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'logfire.json_schema',
-      expect.stringContaining('"tool_response"'),
-    );
   });
 
   it('does not capture tool output by default', () => {
