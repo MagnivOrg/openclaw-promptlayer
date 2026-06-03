@@ -26,7 +26,7 @@ src/
   gen-ai-span-attributes.ts GenAI usage attributes
   util.ts                   Message normalization and JSON handling
   hooks/
-    before-agent-start.ts   Root invoke_agent span creation
+    before-agent-start.ts   Root invoke_agent span creation from before_prompt_build
     llm-input.ts            Pending chat span context capture
     llm-output.ts           Chat span emission and token accumulation
     before-tool-call.ts     execute_tool span creation
@@ -88,7 +88,7 @@ Common attributes:
 
 Every opened span must be closed.
 
-1. `before_agent_start` opens the root `invoke_agent` span.
+1. `before_prompt_build` opens the root `invoke_agent` span.
 2. `llm_input` stores pending chat context for a specific `runId`.
 3. `llm_output` emits the `chat <model>` span and removes the pending LLM entry.
 4. `before_tool_call` opens an `execute_tool <tool>` span.

@@ -239,41 +239,6 @@ Make sure OpenClaw emits `llm_input` and `llm_output` for the run. The plugin cr
 
 OpenClaw does not always expose tool-level error details in `tool_result_persist`. In those cases, failures may be reflected on the root agent span instead of the individual tool span.
 
-## Local Development
-
-```bash
-git clone https://github.com/MagnivOrg/openclaw-promptlayer
-cd openclaw-promptlayer
-npm install
-npm run build
-```
-
-To load the local checkout in OpenClaw, symlink it into your extensions directory or add the repo path to `plugins.load.paths`.
-
-```bash
-ln -s "$(pwd)" ~/.openclaw/extensions/openclaw-promptlayer
-```
-
-Or:
-
-```json
-{
-  "plugins": {
-    "load": {
-      "paths": [
-        "/absolute/path/to/openclaw-promptlayer"
-      ]
-    }
-  }
-}
-```
-
-Then export `PROMPTLAYER_API_KEY`, restart OpenClaw, and verify with:
-
-```bash
-openclaw plugins list
-```
-
 ## Origins
 
 This project began as a repurposed fork of the OpenClaw Logfire plugin. The current PromptLayer integration has diverged substantially; this documentation describes the current PromptLayer behavior.
