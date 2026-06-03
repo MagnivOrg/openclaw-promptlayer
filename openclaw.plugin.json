@@ -1,6 +1,9 @@
 {
   "id": "openclaw-promptlayer",
   "kind": "observability",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

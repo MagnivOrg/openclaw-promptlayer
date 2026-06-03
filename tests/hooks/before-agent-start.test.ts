@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanKind } from '@opentelemetry/api';
 import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleBeforeAgentStart } from '../../src/hooks/before-agent-start.js';
-import type { BeforeAgentStartEvent, AgentContext } from '../../src/hooks/before-agent-start.js';
+import { handleBeforePromptBuild } from '../../src/hooks/before-agent-start.js';
+import type { BeforePromptBuildEvent, AgentContext } from '../../src/hooks/before-agent-start.js';
 
 // Hoisted so they're available when vi.mock factory runs
 const { mockAgentSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
@@ -45,7 +45,7 @@ vi.mock('../../src/otel.js', () => ({
   getPromptLayerTracer: vi.fn(() => mockTracerInstance),
 }));
 
-describe('handleBeforeAgentStart', () => {
+describe('handleBeforePromptBuild', () => {
   const config = createTestConfig({ providerName: 'anthropic' });
 
   beforeEach(() => {
@@ -59,7 +59,7 @@ describe('handleBeforeAgentStart', () => {
     spanStore.delete('session-2');
   });
 
-  const baseEvent: BeforeAgentStartEvent = {
+  const baseEvent: BeforePromptBuildEvent = {
     prompt: 'Hello agent',
   };
 
@@ -70,7 +70,7 @@ describe('handleBeforeAgentStart', () => {
       workspaceDir: '/workspaces/marketing',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     const session = spanStore.get('session-1');
     expect(session).toBeDefined();
@@ -82,13 +82,13 @@ describe('handleBeforeAgentStart', () => {
     expect(session!.tokens).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
-  it('stores initial history messages from before_agent_start', () => {
+  it('stores initial history messages from before_prompt_build', () => {
     const ctx: AgentContext = {
       agentId: 'my-agent',
       sessionKey: 'session-1',
     };
 
-    handleBeforeAgentStart(
+    handleBeforePromptBuild(
       {
         ...baseEvent,
         messages: [
@@ -114,7 +114,7 @@ describe('handleBeforeAgentStart', () => {
       messageProvider: 'slack',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       'invoke_agent my-agent',
@@ -147,7 +147,7 @@ describe('handleBeforeAgentStart', () => {
       sessionId: 'session-2',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(spanStore.get('session-2')).toBeDefined();
   });
@@ -155,7 +155,7 @@ describe('handleBeforeAgentStart', () => {
   it('returns early when neither sessionKey nor sessionId is present', () => {
     const ctx: AgentContext = { agentId: 'my-agent' };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
@@ -163,7 +163,7 @@ describe('handleBeforeAgentStart', () => {
   it('uses "agent" as default name when agentId is missing', () => {
     const ctx: AgentContext = { sessionKey: 'session-1' };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       'invoke_agent agent',
@@ -178,7 +178,7 @@ describe('handleBeforeAgentStart', () => {
       sessionKey: 'session-1',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       expect.anything(),
@@ -197,8 +197,8 @@ describe('handleBeforeAgentStart', () => {
       sessionKey: 'session-1',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
-    handleBeforeAgentStart(
+    handleBeforePromptBuild(baseEvent, ctx, config);
+    handleBeforePromptBuild(
       {
         ...baseEvent,
         messages: [{ role: 'user', content: 'history' }],

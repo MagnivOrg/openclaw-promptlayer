@@ -37,6 +37,7 @@ Follow this order:
 
 ```bash
 openclaw plugins install @promptlayer/openclaw-promptlayer
+openclaw plugins enable openclaw-promptlayer
 ```
 
 2. Prefer environment-based auth:
@@ -53,6 +54,9 @@ export PROMPTLAYER_API_KEY="<your-api-key>"
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {}
       }
     }
@@ -60,12 +64,19 @@ export PROMPTLAYER_API_KEY="<your-api-key>"
 }
 ```
 
-4. Restart OpenClaw.
+4. Restart OpenClaw:
+
+```bash
+openclaw gateway restart
+```
+
 5. Verify that PromptLayer receives traces.
 
 ## If The User Does Not Have An API Key Yet
 
 Guide them to create or retrieve a PromptLayer API key from their PromptLayer account settings or workspace settings. Use the environment variable `PROMPTLAYER_API_KEY` unless they explicitly want to put the key in OpenClaw config as `apiKey`.
+
+Install alone is not enough. The plugin intentionally disables itself unless the OpenClaw gateway process can read `PROMPTLAYER_API_KEY` or `plugins.entries.openclaw-promptlayer.config.apiKey`.
 
 ## Recommended Config Templates
 
@@ -79,6 +90,9 @@ Use this when the user wants the safest starting point:
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {}
       }
     }
@@ -96,6 +110,9 @@ Use this when OpenClaw provider ids need to be mapped to OTEL GenAI provider nam
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {
           // Use PROMPTLAYER_API_KEY in the environment unless the user explicitly
           // wants to keep the API key in config.
@@ -137,6 +154,7 @@ These keys currently affect runtime behavior:
 - Chat spans emit modern `gen_ai.input.messages` and `gen_ai.output.messages` JSON attributes when message data is available.
 - Thinking/reasoning content is preserved as `thinking` parts inside `gen_ai.output.messages`.
 - `agent_end` may wait briefly for pending `llm_output` processing before finalizing the root span.
+- Non-bundled OpenClaw plugins need `hooks.allowConversationAccess: true` to receive raw conversation hooks such as `llm_input`, `llm_output`, and `agent_end`.
 
 ## Payload Notes
 
@@ -149,10 +167,11 @@ If traces do not appear:
 
 1. Check that `PROMPTLAYER_API_KEY` exists in the OpenClaw runtime environment, or that `apiKey` is configured.
 2. Check that the plugin key is exactly `openclaw-promptlayer`.
-3. Check that OpenClaw was restarted after config or environment changes.
-4. Check that OpenClaw is new enough to emit `llm_input`, `llm_output`, and `before_tool_call`.
-5. Check network access to the configured endpoint.
-6. Check OpenClaw logs for `PromptLayer trace export failed`.
+3. Check that `plugins.entries.openclaw-promptlayer.hooks.allowConversationAccess` is `true`.
+4. Check that OpenClaw was restarted after config or environment changes.
+5. Check that OpenClaw is new enough to emit `llm_input`, `llm_output`, and `before_tool_call`.
+6. Check network access to the configured endpoint.
+7. Check OpenClaw logs for `PromptLayer trace export failed`.
 
 If chat spans are missing or incomplete:
 

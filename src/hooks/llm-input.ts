@@ -16,7 +16,7 @@ import {
   normalizeToGenAiToolDefinitions,
 } from '../util.js';
 import type { PromptLayerPluginConfig } from '../config.js';
-import { handleBeforeAgentStart } from './before-agent-start.js';
+import { handleBeforePromptBuild } from './before-agent-start.js';
 
 /** OpenClaw llm_input event payload (minimal — only fields we use). */
 export interface LlmInputEvent {
@@ -31,7 +31,7 @@ export interface LlmInputEvent {
   tools?: unknown[];
 }
 
-/** OpenClaw agent context (shared with before_agent_start, agent_end, etc.). */
+/** OpenClaw agent context shared by LLM and agent lifecycle hooks. */
 export interface LlmContext {
   agentId?: string;
   sessionKey?: string;
@@ -50,7 +50,7 @@ export function handleLlmInput(
 
   let session = spanStore.get(sessionKey);
   if (!session) {
-    handleBeforeAgentStart(
+    handleBeforePromptBuild(
       { prompt: event.prompt, messages: event.historyMessages },
       ctx,
       config,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /**
- * Hook: before_agent_start
+ * Hook: before_prompt_build
  *
  * Creates the root `invoke_agent` span following OTEL GenAI semantic
  * conventions.  This span parents all tool call spans and is closed
@@ -16,8 +16,8 @@ import {
 import type { PromptLayerPluginConfig } from '../config.js';
 import { getPromptLayerTracer } from '../otel.js';
 
-/** OpenClaw before_agent_start event payload. */
-export interface BeforeAgentStartEvent {
+/** OpenClaw before_prompt_build event payload. */
+export interface BeforePromptBuildEvent {
   prompt: string;
   messages?: unknown[];
 }
@@ -31,8 +31,8 @@ export interface AgentContext {
   messageProvider?: string;
 }
 
-export function handleBeforeAgentStart(
-  event: BeforeAgentStartEvent,
+export function handleBeforePromptBuild(
+  event: BeforePromptBuildEvent,
   ctx: AgentContext,
   config: PromptLayerPluginConfig,
 ): void {

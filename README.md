@@ -26,6 +26,7 @@ Install the plugin:
 
 ```bash
 openclaw plugins install @promptlayer/openclaw-promptlayer
+openclaw plugins enable openclaw-promptlayer
 ```
 
 Set your PromptLayer API key in the environment that OpenClaw runs with:
@@ -42,6 +43,9 @@ Then enable the plugin in `openclaw.json`:
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {}
       }
     }
@@ -50,6 +54,12 @@ Then enable the plugin in `openclaw.json`:
 ```
 
 The plugin id must be `openclaw-promptlayer`.
+
+Restart OpenClaw after installing or changing configuration:
+
+```bash
+openclaw gateway restart
+```
 
 ## Quick Start
 
@@ -61,6 +71,9 @@ Production configuration:
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {}
       }
     }
@@ -82,6 +95,9 @@ Use config only when you need to override the endpoint, environment labels, serv
     "entries": {
       "openclaw-promptlayer": {
         "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true
+        },
         "config": {
           // Prefer PROMPTLAYER_API_KEY in the environment.
           // You can set "apiKey" here, but env vars are safer.
@@ -104,6 +120,7 @@ Use config only when you need to override the endpoint, environment labels, serv
 Notes:
 
 - Message, tool argument, and tool result attributes are exported as normal OTEL span attributes.
+- `hooks.allowConversationAccess` is required because OpenClaw gates raw conversation hooks such as `llm_input`, `llm_output`, and `agent_end` for non-bundled plugins.
 - `spanProcessorType: "simple"` is useful when debugging exporter behavior because spans are exported immediately.
 
 ## What The Plugin Captures
@@ -208,10 +225,11 @@ Check these first:
 
 1. `PROMPTLAYER_API_KEY` is set in the environment seen by OpenClaw, or `apiKey` is set in plugin config.
 2. The plugin entry key is exactly `openclaw-promptlayer`.
-3. OpenClaw is at least `2026.2.1`.
-4. OpenClaw was restarted after config or environment changes.
-5. Your machine can reach the configured endpoint.
-6. OpenClaw logs do not show `PromptLayer trace export failed`.
+3. `plugins.entries.openclaw-promptlayer.hooks.allowConversationAccess` is `true`.
+4. OpenClaw is at least `2026.2.1`.
+5. OpenClaw was restarted after config or environment changes.
+6. Your machine can reach the configured endpoint.
+7. OpenClaw logs do not show `PromptLayer trace export failed`.
 
 ### Chat spans are missing or incomplete
 

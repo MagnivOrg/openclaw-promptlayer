@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 import { resolveConfig } from './config.js';
 import { initializeOtel } from './otel.js';
-import { handleBeforeAgentStart } from './hooks/before-agent-start.js';
+import { handleBeforePromptBuild } from './hooks/before-agent-start.js';
 import { handleBeforeToolCall } from './hooks/before-tool-call.js';
 import { handleToolResultPersist } from './hooks/tool-result-persist.js';
 import { handleAgentEnd } from './hooks/agent-end.js';
 import { handleLlmInput } from './hooks/llm-input.js';
 import { handleLlmOutput } from './hooks/llm-output.js';
 import type { PromptLayerOtel } from './otel.js';
-import type { BeforeAgentStartEvent, AgentContext } from './hooks/before-agent-start.js';
+import type { BeforePromptBuildEvent, AgentContext } from './hooks/before-agent-start.js';
 import type { BeforeToolCallEvent, ToolContext } from './hooks/before-tool-call.js';
 import type { ToolResultPersistEvent, ToolResultPersistContext } from './hooks/tool-result-persist.js';
 import type { AgentEndEvent } from './hooks/agent-end.js';
@@ -64,24 +64,11 @@ export default function register(api: PluginApi): void {
     return;
   }
 
-  api.on('before_agent_start', (event, ctx) => {
-    if (!isRecord(event) || !isRecord(ctx)) return;
-    try {
-      handleBeforeAgentStart(
-        event as unknown as BeforeAgentStartEvent,
-        ctx as unknown as AgentContext,
-        config,
-      );
-    } catch (err) {
-      api.logger.warn(`PromptLayer before_agent_start error: ${err}`);
-    }
-  });
-
   api.on('before_prompt_build', (event, ctx) => {
     if (!isRecord(event) || !isRecord(ctx)) return;
     try {
-      handleBeforeAgentStart(
-        event as unknown as BeforeAgentStartEvent,
+      handleBeforePromptBuild(
+        event as unknown as BeforePromptBuildEvent,
         ctx as unknown as AgentContext,
         config,
       );
