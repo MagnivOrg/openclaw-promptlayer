@@ -8,7 +8,7 @@
 
 import { vi } from 'vitest';
 import type { Span, Context, SpanContext } from '@opentelemetry/api';
-import type { LogfirePluginConfig } from './config.js';
+import type { PromptLayerPluginConfig } from '../src/config.js';
 
 /** Create a mock OTEL Span with all methods as vi.fn(). */
 export function mockSpan(overrides?: Partial<SpanContext>): Span {
@@ -37,41 +37,17 @@ export function mockContext(): Context {
   return {} as Context;
 }
 
-/**
- * Create a minimal LogfirePluginConfig with sensible test defaults.
- * All capture flags are off by default to keep tests explicit.
- */
+/** Create a minimal PromptLayerPluginConfig with sensible test defaults. */
 export function createTestConfig(
-  overrides?: Partial<LogfirePluginConfig>,
-): LogfirePluginConfig {
+  overrides?: Partial<PromptLayerPluginConfig>,
+): PromptLayerPluginConfig {
   return {
-    token: 'test-token',
-    projectUrl: '',
-    region: 'us',
+    apiKey: 'test-token',
+    endpoint: 'https://api.promptlayer.com/v1/traces',
     environment: 'test',
     serviceName: 'openclaw-agent',
     providerName: '',
     providerNameMap: {},
-    captureToolInput: false,
-    captureToolOutput: false,
-    toolInputMaxLength: 2048,
-    toolOutputMaxLength: 512,
-    captureStackTraces: true,
-    captureMessageContent: false,
-    captureHistoryMessages: false,
-    historyMessagesMaxLength: 16384,
-    captureToolDefinitions: false,
-    redactSecrets: true,
-    distributedTracing: {
-      enabled: false,
-      injectIntoCommands: true,
-      extractFromWebhooks: true,
-      urlPatterns: ['*'],
-    },
-    enableMetrics: false,
-    metricsIntervalMs: 60000,
-    enableTraceLinks: false,
-    logLevel: 'info',
     resourceAttributes: {},
     spanProcessorType: 'batch',
     batchConfig: {
@@ -79,7 +55,6 @@ export function createTestConfig(
       maxExportBatchSize: 512,
       scheduledDelayMs: 5000,
     },
-    useGenAiCompatibilityScope: true,
     ...overrides,
   };
 }

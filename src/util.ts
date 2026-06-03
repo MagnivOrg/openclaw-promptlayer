@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: MIT
 /**
- * Shared utilities: safe JSON serialization, truncation, secret redaction.
+ * Shared utilities: safe JSON serialization and message normalization.
  */
-
-/** Patterns that likely indicate secret values. */
-const SECRET_PATTERNS = [
-  /(?:api[_-]?key|token|secret|password|auth|credential|bearer)\s*[:=]\s*["']?[^\s"',}{]{8,}/gi,
-  /(?:sk|pk|rk|pat|ghp|gho|glpat|xox[bpras])[_-][A-Za-z0-9_-]{10,}/g,
-  /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g, // JWT
-];
 
 /**
  * Serialize a value to JSON, handling circular refs and BigInts.
@@ -30,48 +23,13 @@ export function safeJsonStringify(value: unknown): string {
   }
 }
 
-/** Truncate a string to maxLength, appending "...[truncated]" if needed. */
-export function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  return value.slice(0, maxLength) + '...[truncated]';
-}
-
-/** Redact likely secrets from a string. */
-export function redactSecrets(value: string): string {
-  let result = value;
-  for (const pattern of SECRET_PATTERNS) {
-    // Reset lastIndex for global regexes
-    pattern.lastIndex = 0;
-    result = result.replace(pattern, (match) => {
-      // Keep the key name, redact the value portion
-      const eqIdx = match.search(/[:=]/);
-      if (eqIdx !== -1) {
-        return match.slice(0, eqIdx + 1) + ' [REDACTED]';
-      }
-      return '[REDACTED]';
-    });
-  }
-  return result;
+/** Prepare a value for recording as a span attribute. */
+export function prepareForCapture(value: unknown): string {
+  return typeof value === 'string' ? value : safeJsonStringify(value);
 }
 
 /**
- * Prepare a tool input/output value for recording as a span attribute.
- * Serializes to JSON, optionally redacts secrets, and truncates.
- */
-export function prepareForCapture(
-  value: unknown,
-  maxLength: number,
-  redact: boolean,
-): string {
-  let str = typeof value === 'string' ? value : safeJsonStringify(value);
-  if (redact) {
-    str = redactSecrets(str);
-  }
-  return truncate(str, maxLength);
-}
-
-/**
- * Resolve OpenClaw provider id to OTel/Logfire gen_ai.provider.name.
+ * Resolve OpenClaw provider id to OTel gen_ai.provider.name.
  * If providerNameMap[provider] exists (e.g. gmn -> openai), use it; otherwise return provider.
  */
 export function resolveProviderName(
@@ -112,7 +70,7 @@ export function resolveGenAiSystemName(
   return provider ?? 'unknown';
 }
 
-/** OTel / Pydantic AI 兼容的消息 part。 */
+/** OTel GenAI-compatible message part. */
 export interface GenAiMessagePart {
   type: string;
   content?: string;
@@ -123,7 +81,7 @@ export interface GenAiMessagePart {
   response?: string | Record<string, unknown>;
 }
 
-/** OTel GenAI 单条消息：role + parts，用于 gen_ai.input.messages / gen_ai.output.messages */
+/** OTel GenAI message shape used for gen_ai.input.messages and gen_ai.output.messages. */
 export interface GenAiChatMessage {
   role: string;
   parts: GenAiMessagePart[];
@@ -131,25 +89,31 @@ export interface GenAiChatMessage {
   finish_reason?: string;
 }
 
-/** system instructions 的最小结构。 */
+/** Minimal system instruction part shape. */
 export interface SystemInstructionPart {
   type: 'text';
   content: string;
 }
 
-/** JSON schema property 定义。 */
-export interface JsonSchemaProperty {
-  type?: 'array' | 'object' | 'string' | 'number' | 'boolean';
+export interface GenAiToolDefinition {
+  type: 'function';
+  name: string;
+  description?: string;
+  parameters?: unknown;
 }
 
-/** 输入消息规范化选项。 */
+/** Input message normalization options. */
 export interface NormalizeInputMessagesOptions {
   toolResultRole?: 'tool' | 'user';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 /**
  * Normalize OpenClaw/OpenAI-style message list to OTel GenAI gen_ai.input.messages format
- * (Input messages JSON schema) for Logfire LLM Panels (multi-turn + tool call/response).
+ * (Input messages JSON schema) for GenAI semantic convention attributes.
  * @see https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-input-messages.json
  */
 export function normalizeToGenAiInputMessages(
@@ -159,7 +123,7 @@ export function normalizeToGenAiInputMessages(
   if (!Array.isArray(messages) || messages.length === 0) return [];
 
   const out: GenAiChatMessage[] = [];
-  const toolResultRole = options?.toolResultRole ?? 'user';
+  const toolResultRole = options?.toolResultRole ?? 'tool';
 
   for (const msg of messages) {
     if (!msg || typeof msg !== 'object') continue;
@@ -275,9 +239,10 @@ export function normalizeToGenAiInputMessages(
 }
 
 /**
- * 将 OpenClaw/OpenAI/Anthropic 样式的单条 assistant 消息转为 OTel GenAI gen_ai.output.messages 格式。
- * 支持：content 字符串、content 数组（text / tool_use / reasoning）、tool_calls。
- * Logfire 据此正确解析多轮、工具调用、思考内容为富文本。
+ * Convert one OpenClaw/OpenAI/Anthropic-style assistant message to
+ * the OTel GenAI gen_ai.output.messages shape.
+ * Supports string content, content arrays (text / tool_use / reasoning), and tool_calls.
+ * This preserves multi-turn, tool-call, and reasoning structure.
  */
 function appendTaggedOutputParts(parts: GenAiMessagePart[], rawText: string): void {
   if (rawText === '') return;
@@ -324,7 +289,7 @@ function appendOutputPartsFromString(parts: GenAiMessagePart[], rawText: string)
         appendOutputPartFromBlock(parts, parsedLine);
         continue;
       } catch {
-        // 不是合法 JSON 行时，回退到普通文本解析
+        // Not valid JSONL; fall back to plain text parsing.
       }
     }
 
@@ -332,29 +297,6 @@ function appendOutputPartsFromString(parts: GenAiMessagePart[], rawText: string)
   }
 
   flushPlainTextBuffer();
-}
-
-function parseOpenClawJsonlContent(rawText: string): unknown[] | null {
-  const trimmed = rawText.trim();
-  if (trimmed === '') return null;
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
-
-  const lines = trimmed
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '');
-
-  if (lines.length === 0) return null;
-
-  const parsed: unknown[] = [];
-  for (const line of lines) {
-    try {
-      parsed.push(JSON.parse(line) as unknown);
-    } catch {
-      return null;
-    }
-  }
-  return parsed;
 }
 
 function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): void {
@@ -376,11 +318,16 @@ function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): v
       : b.content !== undefined && b.type === 'thinking'
         ? String(b.content)
         : undefined;
+  const reasoningVal = extractReasoningText(b);
 
   if ((b.type === 'text' || b.type === 'output_text') && textVal !== undefined) {
     appendTaggedOutputParts(parts, textVal);
   } else if (b.type === 'thinking' && thinkingVal !== undefined) {
     parts.push({ type: 'thinking', content: thinkingVal });
+  } else if (b.type === 'redacted_thinking') {
+    parts.push({ type: 'thinking', content: '[redacted thinking]' });
+  } else if (b.type === 'reasoning' && reasoningVal !== undefined) {
+    parts.push({ type: 'thinking', content: reasoningVal });
   } else if (
     (b.type === 'reasoning' || b.type === 'thinking' || b.thought === true) &&
     textVal !== undefined
@@ -410,6 +357,54 @@ function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): v
   }
 }
 
+function extractTextFromUnknown(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+function extractReasoningText(block: Record<string, unknown>): string | undefined {
+  const direct =
+    extractTextFromUnknown(block.reasoning) ??
+    extractTextFromUnknown(block.reasoning_content) ??
+    extractTextFromUnknown(block.thinking) ??
+    extractTextFromUnknown(block.content) ??
+    extractTextFromUnknown(block.text);
+  if (direct !== undefined) return direct;
+
+  return extractReasoningSummary(block.summary);
+}
+
+function extractTopLevelReasoningText(message: Record<string, unknown>): string | undefined {
+  return (
+    extractTextFromUnknown(message.reasoning) ??
+    extractTextFromUnknown(message.reasoning_content) ??
+    extractTextFromUnknown(message.thinking) ??
+    extractReasoningSummary(message.summary)
+  );
+}
+
+function extractReasoningSummary(summary: unknown): string | undefined {
+  if (!Array.isArray(summary)) return undefined;
+
+  const parts = summary
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      if (!item || typeof item !== 'object') return '';
+      const record = item as Record<string, unknown>;
+      return (
+        extractTextFromUnknown(record.text) ??
+        extractTextFromUnknown(record.content) ??
+        extractTextFromUnknown(record.summary_text) ??
+        ''
+      );
+    })
+    .map((part) => part.trim())
+    .filter((part) => part !== '');
+
+  return parts.length > 0 ? parts.join('\n') : undefined;
+}
+
 export function normalizeToGenAiOutputMessages(
   assistantMessage: unknown,
   finishReason?: string,
@@ -421,9 +416,14 @@ export function normalizeToGenAiOutputMessages(
   const parts: GenAiMessagePart[] = [];
   const content = raw.content;
   const toolCalls = raw.tool_calls as Array<Record<string, unknown>> | undefined;
+  const reasoningContent = extractTopLevelReasoningText(raw);
+
+  if (reasoningContent !== undefined) {
+    parts.push({ type: 'thinking', content: reasoningContent });
+  }
 
   if (content === undefined || content === null) {
-    // 仅 tool_calls 时可能无 content
+    // Tool-call-only assistant messages may not include content.
   } else if (typeof content === 'string') {
     appendOutputPartsFromString(parts, content);
   } else if (Array.isArray(content)) {
@@ -458,9 +458,9 @@ export function normalizeToGenAiOutputMessages(
 }
 
 /**
- * 构建单次 LLM 调用的完整 gen_ai.input.messages（OTel/Logfire 语义）：
- * 可选的 system + historyMessages 规范化 + 当前轮用户消息（prompt）。
- * 这样 Logfire 能正确解析多轮对话、工具调用、思考等为富文本。
+ * Build gen_ai.input.messages for one LLM call:
+ * optional system instructions, normalized history, and the current user prompt.
+ * Preserves multi-turn, tool-call, and reasoning structure.
  */
 export function buildFullInputMessages(
   systemPrompt: string | undefined,
@@ -489,7 +489,7 @@ export function buildFullInputMessages(
   return out;
 }
 
-/** 将 system prompt 规范化为可供 Logfire 解析的数组。 */
+/** Normalize a system prompt to GenAI message parts. */
 export function buildSystemInstructions(
   systemPrompt: string | undefined,
 ): SystemInstructionPart[] {
@@ -499,7 +499,7 @@ export function buildSystemInstructions(
   return [{ type: 'text', content: trimmedPrompt }];
 }
 
-/** 基于当前轮输入基底与最新 assistant 输出构造根 span 的完整消息数组。 */
+/** Build the full message array from the current input base and assistant output. */
 export function buildPydanticAiAllMessages(
   baseMessages: GenAiChatMessage[] | undefined,
   assistantMessages: GenAiChatMessage[],
@@ -509,19 +509,50 @@ export function buildPydanticAiAllMessages(
   return [...normalizedBaseMessages, ...assistantMessages];
 }
 
-/** 将 agent_end 的完整 messages 快照转为可供根/chat span 复用的消息数组。 */
+/** Convert the agent_end message snapshot into reusable GenAI messages. */
 export function buildMessagesFromConversationHistory(
   messages: unknown[] | undefined,
 ): GenAiChatMessage[] {
   if (!Array.isArray(messages) || messages.length === 0) return [];
-  return normalizeToGenAiInputMessages(messages, { toolResultRole: 'user' });
+  return normalizeToGenAiInputMessages(messages, { toolResultRole: 'tool' });
+}
+
+export function normalizeToGenAiToolDefinitions(
+  tools: unknown[] | undefined,
+): GenAiToolDefinition[] {
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+
+  const out: GenAiToolDefinition[] = [];
+  for (const tool of tools) {
+    if (!isRecord(tool)) continue;
+
+    const rawFunction = isRecord(tool.function) ? tool.function : undefined;
+    const source = rawFunction ?? tool;
+    const rawName = source.name;
+    if (typeof rawName !== 'string' || rawName === '') continue;
+
+    const definition: GenAiToolDefinition = {
+      type: 'function',
+      name: rawName,
+    };
+    if (typeof source.description === 'string' && source.description !== '') {
+      definition.description = source.description;
+    }
+    const parameters = source.parameters ?? source.input_schema ?? source.schema;
+    if (parameters !== undefined) {
+      definition.parameters = parameters;
+    }
+    out.push(definition);
+  }
+
+  return out;
 }
 
 function isMessageEquivalent(left: GenAiChatMessage, right: GenAiChatMessage): boolean {
   return safeJsonStringify(left) === safeJsonStringify(right);
 }
 
-/** 从完整会话消息中切出当前 LLM 调用对应的输出片段。 */
+/** Extract the output segment corresponding to the current LLM call. */
 export function extractConversationOutputMessages(
   fullConversationMessages: GenAiChatMessage[],
   inputMessages: GenAiChatMessage[],
@@ -541,7 +572,7 @@ export function extractConversationOutputMessages(
   return fullConversationMessages.slice(comparableInputMessages.length);
 }
 
-/** 将 assistantTexts 兜底转成一条 assistant 消息。 */
+/** Convert assistantTexts fallback content into one assistant message. */
 export function buildAssistantMessagesFromTexts(
   assistantTexts: string[] | undefined,
   finishReason?: string,
@@ -565,7 +596,7 @@ export function buildAssistantMessagesFromTexts(
   return [message];
 }
 
-/** 提取最终回答正文，优先取最后一条 assistant 的 text part。 */
+/** Extract the final answer text from the last assistant text part. */
 export function extractFinalResult(
   allMessages: GenAiChatMessage[],
 ): string | undefined {
@@ -583,51 +614,7 @@ export function extractFinalResult(
   return undefined;
 }
 
-/**
- * Logfire 用此 attribute 的 JSON schema 声明各 attribute 的类型；
- * 声明为 array 后，后端会把 JSON 字符串解析为数组再展示（LLM 面板等）。
- * @see https://github.com/pydantic/logfire
- */
-export const LOGFIRE_JSON_SCHEMA_KEY = 'logfire.json_schema';
-
-/**
- * 与官方 opentelemetry-instrumentation-google-genai 一致的 instrumentation scope 名称。
- * 使用此 scope 时，Logfire 后端会按 Google Gen AI 方式解析并展示 LLM 富文本面板。
- * @see https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/instrumentation-genai/opentelemetry-instrumentation-google-genai/src/opentelemetry/instrumentation/google_genai/otel_wrapper.py
- */
-export const LOGFIRE_GENAI_COMPAT_SCOPE_NAME = 'opentelemetry.instrumentation.google_genai';
-
-/** 与官方 Pydantic AI span 一致的 instrumentation scope 名称。 */
-export const LOGFIRE_PYDANTIC_AI_SCOPE_NAME = 'pydantic-ai';
-
-/** 将 schema properties 包装成 Logfire 期望的 JSON schema。 */
-export function buildLogfireJsonSchema(
-  properties: Record<string, JsonSchemaProperty>,
-): string {
-  return JSON.stringify({
-    type: 'object',
-    properties,
-  });
-}
-
-/** chat span 的消息属性 schema。 */
-export const GEN_AI_CHAT_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  'gen_ai.input.messages': { type: 'array' },
-  'gen_ai.output.messages': { type: 'array' },
-  'gen_ai.system_instructions': { type: 'array' },
-});
-
-/** 根 agent span 的 pydantic-ai 属性 schema。 */
-export const PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  'pydantic_ai.all_messages': { type: 'array' },
-  'gen_ai.system_instructions': { type: 'array' },
-});
-
-/** tool span 的结构化参数/结果 schema。 */
-export const TOOL_SPAN_ATTRIBUTES_SCHEMA_STRING = buildLogfireJsonSchema({
-  tool_arguments: { type: 'object' },
-  tool_response: { type: 'object' },
-});
+export const INSTRUMENTATION_SCOPE_NAME = 'openclaw-promptlayer';
 
 /**
  * Extract workspace name from a workspace directory path.

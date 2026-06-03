@@ -8,10 +8,10 @@
  */
 
 import type { Span, Context } from '@opentelemetry/api';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 import type { Logger, AgentEndEvent } from '../hooks/agent-end.js';
 import type { AgentContext } from '../hooks/before-agent-start.js';
-import type { GenAiChatMessage, SystemInstructionPart } from '../util.js';
+import type { GenAiChatMessage, GenAiToolDefinition, SystemInstructionPart } from '../util.js';
 
 export interface ToolSpanEntry {
   span: Span;
@@ -25,14 +25,28 @@ export interface ToolSpanEntry {
 
 export interface LlmSpanEntry {
   runId: string;
+  sessionKey: string;
   agentName: string;
   provider: string;
   model: string;
   startTime: number;
-  /** 当前轮请求基底，用于在 llm_output 和 agent_end 汇总完整消息。 */
+  /** Base request messages for the current LLM call. */
   inputMessages: GenAiChatMessage[];
-  /** 当前轮 system instructions，供 chat span 与根 span 复用。 */
+  /** System instructions shared by the chat span and session summary. */
   systemInstructions: SystemInstructionPart[];
+  /** Tool definitions available to this LLM call. */
+  toolDefinitions?: GenAiToolDefinition[];
+  /** Output observed by llm_output; emitted at agent_end to avoid whole-turn pairing. */
+  outputMessages?: GenAiChatMessage[];
+  finishReason?: string;
+  responseId?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
+  endTime?: number;
 }
 
 export interface CompletedToolCall {
@@ -43,17 +57,6 @@ export interface CompletedToolCall {
   endTime: number;
   params?: Record<string, unknown>;
   result?: unknown;
-}
-
-export interface ToolGroupEntry {
-  span: Span;
-  ctx: Context;
-  runId: string;
-  toolNames: string[];
-  openToolCount: number;
-  startTime: number;
-  /** 最近一次工具批次自然结束时间；若仍在执行中则为空。 */
-  endTime?: number;
 }
 
 export interface TokenAccumulator {
@@ -74,11 +77,11 @@ export interface SessionSpanContext {
   /** Pending LLM call spans indexed by runId */
   llmSpans: Map<string, LlmSpanEntry>;
 
-  /** 已完成的工具调用记录，供 llm_output 阶段化重建 chat spans。 */
-  completedToolCalls: CompletedToolCall[];
+  /** Completed LLM hook payloads waiting to be reconciled at agent_end. */
+  completedLlmCalls: LlmSpanEntry[];
 
-  /** 当前 run 正在执行的工具组 span。 */
-  activeToolGroups: Map<string, ToolGroupEntry>;
+  /** Completed tool calls used when reconstructing later chat spans. */
+  completedToolCalls: CompletedToolCall[];
 
   /** Accumulated token usage across all LLM calls */
   tokens: TokenAccumulator;
@@ -89,19 +92,28 @@ export interface SessionSpanContext {
   /** Last known provider (set by llm_input/llm_output hooks) */
   provider?: string;
 
-  /** Last LLM runId (set by llm_input), 用于 agent 出错时日志关联 */
+  /** Last LLM runId, used to correlate agent error logs. */
   lastLlmRunId?: string;
 
-  /** Last LLM 输入摘要 (set by llm_input)，agent 出错时打出便于排查 */
+  /** Last LLM input preview, used in agent error logs. */
   lastLlmPrompt?: string;
 
-  /** 当前会话最后一轮可用于根 span 展示的完整消息。 */
+  /** Latest full message set for the current session. */
   latestAllMessages?: GenAiChatMessage[];
 
-  /** 当前会话最后一轮 system instructions。 */
+  /** Latest system instructions for the current session. */
   latestSystemInstructions?: SystemInstructionPart[];
 
-  /** agent_start 阶段拿到的会话历史，作为 llm_input 缺省 history 的兜底。 */
+  /** Last emitted chat span end time, used to sequence reconstructed final calls. */
+  lastChatEndTime?: number;
+
+  /** Whether the last emitted chat span contained final assistant text. */
+  lastChatHadTextOutput?: boolean;
+
+  /** Whether the last emitted chat span requested tool execution. */
+  lastChatHadToolCall?: boolean;
+
+  /** History captured at agent start for llm_input fallback. */
   initialHistoryMessages?: GenAiChatMessage[];
 
   /** Monotonic tool call counter for sequencing */
@@ -113,11 +125,11 @@ export interface SessionSpanContext {
   /** Request start timestamp */
   startTime: number;
 
-  /** agent_end 已触发，等待最后一个 llm_output 收尾后再真正结束 agent span */
+  /** Deferred agent_end data while waiting for pending llm_output events. */
   deferredAgentEnd?: {
     event: AgentEndEvent;
     ctx: AgentContext;
-    config: LogfirePluginConfig;
+    config: PromptLayerPluginConfig;
     logger: Logger;
     requestedAt: number;
   };
@@ -184,7 +196,16 @@ class SpanStore {
     return entry;
   }
 
-  /** 记录已完成的工具调用，供后续阶段化重建 chat spans。 */
+  addCompletedLlmCall(sessionKey: string, entry: LlmSpanEntry): void {
+    const session = this.sessions.get(sessionKey);
+    if (!session) return;
+    if (!Array.isArray(session.completedLlmCalls)) {
+      session.completedLlmCalls = [];
+    }
+    session.completedLlmCalls.push(entry);
+  }
+
+  /** Record a completed tool call for later chat span reconstruction. */
   addCompletedToolCall(sessionKey: string, entry: CompletedToolCall): void {
     const session = this.sessions.get(sessionKey);
     if (!session) return;
@@ -192,26 +213,6 @@ class SpanStore {
       session.completedToolCalls = [];
     }
     session.completedToolCalls.push(entry);
-  }
-
-  getToolGroup(sessionKey: string, runId: string): ToolGroupEntry | undefined {
-    return this.sessions.get(sessionKey)?.activeToolGroups.get(runId);
-  }
-
-  setToolGroup(sessionKey: string, runId: string, entry: ToolGroupEntry): void {
-    const session = this.sessions.get(sessionKey);
-    if (!session) return;
-    session.activeToolGroups.set(runId, entry);
-  }
-
-  deleteToolGroup(sessionKey: string, runId: string): ToolGroupEntry | undefined {
-    const session = this.sessions.get(sessionKey);
-    if (!session) return undefined;
-    const entry = session.activeToolGroups.get(runId);
-    if (entry) {
-      session.activeToolGroups.delete(runId);
-    }
-    return entry;
   }
 
   get size(): number {
@@ -226,9 +227,6 @@ class SpanStore {
         // Close children before parent — reverse order (LIFO)
         for (let i = session.toolStack.length - 1; i >= 0; i--) {
           session.toolStack[i].span.end();
-        }
-        for (const toolGroup of session.activeToolGroups.values()) {
-          toolGroup.span.end(toolGroup.endTime);
         }
         session.agentSpan.end();
         this.sessions.delete(key);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 /**
- * Hook: before_agent_start
+ * Hook: before_prompt_build
  *
  * Creates the root `invoke_agent` span following OTEL GenAI semantic
  * conventions.  This span parents all tool call spans and is closed
@@ -11,13 +11,13 @@ import { trace, context, SpanKind } from '@opentelemetry/api';
 import { spanStore, type SessionSpanContext } from '../context/span-store.js';
 import {
   extractWorkspaceName,
-  LOGFIRE_PYDANTIC_AI_SCOPE_NAME,
   normalizeToGenAiInputMessages,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
+import { getPromptLayerTracer } from '../otel.js';
 
-/** OpenClaw before_agent_start event payload. */
-export interface BeforeAgentStartEvent {
+/** OpenClaw before_prompt_build event payload. */
+export interface BeforePromptBuildEvent {
   prompt: string;
   messages?: unknown[];
 }
@@ -31,16 +31,26 @@ export interface AgentContext {
   messageProvider?: string;
 }
 
-export function handleBeforeAgentStart(
-  event: BeforeAgentStartEvent,
+export function handleBeforePromptBuild(
+  event: BeforePromptBuildEvent,
   ctx: AgentContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
 
-  // 使用 pydantic-ai scope，让 Logfire 更稳定地走已验证过的渲染路径。
-  const tracer = trace.getTracer(LOGFIRE_PYDANTIC_AI_SCOPE_NAME, '1.0.0');
+  const existingSession = spanStore.get(sessionKey);
+  if (existingSession) {
+    if (
+      (existingSession.initialHistoryMessages?.length ?? 0) === 0 &&
+      Array.isArray(event.messages)
+    ) {
+      existingSession.initialHistoryMessages = normalizeToGenAiInputMessages(event.messages);
+    }
+    return;
+  }
+
+  const tracer = getPromptLayerTracer();
   const agentName = ctx.agentId || 'agent';
   const workspace = extractWorkspaceName(ctx.workspaceDir);
 
@@ -60,11 +70,8 @@ export function handleBeforeAgentStart(
         'gen_ai.agent.name': agentName,
         'gen_ai.agent.id': agentName,
         'gen_ai.conversation.id': sessionKey,
-        agent_name: agentName,
-        'logfire.msg': 'agent run',
-        'logfire.span_type': 'span',
-
-        // OpenClaw-specific context
+        'session.id': sessionKey,
+        'openclaw.agent.name': agentName,
         'openclaw.session_key': sessionKey,
         'openclaw.workspace': workspace,
         'openclaw.channel': ctx.messageProvider || 'unknown',
@@ -74,14 +81,13 @@ export function handleBeforeAgentStart(
   );
 
   const agentCtx = trace.setSpan(context.active(), agentSpan);
-
   const session: SessionSpanContext = {
     agentSpan,
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+    completedLlmCalls: [],
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,

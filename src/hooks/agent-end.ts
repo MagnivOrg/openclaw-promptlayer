@@ -2,24 +2,20 @@
 /**
  * Hook: agent_end
  *
- * Closes the invoke_agent span, records token usage and duration,
- * emits metrics, and logs the Logfire trace link.
+ * Closes the invoke_agent span and records final status, usage, and duration.
  */
 
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
-import { buildLogfireTraceUrl } from '../trace-link.js';
-import { recordOperationDuration } from '../metrics/genai-metrics.js';
+import { spanStore, type LlmSpanEntry } from '../context/span-store.js';
 import {
-  extractWorkspaceName,
-  extractErrorDetails,
   buildMessagesFromConversationHistory,
-  extractFinalResult,
-  LOGFIRE_JSON_SCHEMA_KEY,
-  PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
+  extractErrorDetails,
+  normalizeToGenAiInputMessages,
+  type GenAiChatMessage,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
 import type { AgentContext } from './before-agent-start.js';
+import { createChatSpan } from './chat-span.js';
 
 /** OpenClaw agent_end event payload. */
 export interface AgentEndEvent {
@@ -38,11 +34,180 @@ export interface Logger {
 }
 
 const LLM_OUTPUT_WATCHDOG_MS = 10_000;
+const FINAL_CHAT_DURATION_FLOOR_MS = 1;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function hasAssistantText(message: GenAiChatMessage | undefined): boolean {
+  return (
+    message?.role === 'assistant' &&
+    message.parts.some(
+      (part) =>
+        part.type === 'text' &&
+        typeof part.content === 'string' &&
+        part.content.trim() !== '',
+    )
+  );
+}
+
+function unwrapConversationMessages(messages: unknown[] | undefined): Record<string, unknown>[] {
+  if (!Array.isArray(messages)) return [];
+  const out: Record<string, unknown>[] = [];
+  for (const item of messages) {
+    if (!isRecord(item)) continue;
+    const rawMessage = isRecord(item.message) ? item.message : item;
+    if (typeof rawMessage.role !== 'string') continue;
+    out.push(rawMessage);
+  }
+  return out;
+}
+
+function rawMessageTimestamp(raw: Record<string, unknown> | undefined): number | undefined {
+  if (!raw) return undefined;
+  return finiteNumber(raw.timestamp);
+}
+
+function rawAssistantUsage(
+  raw: Record<string, unknown> | undefined,
+): LlmSpanEntry['usage'] | undefined {
+  if (!raw || !isRecord(raw.usage)) return undefined;
+  const usage = raw.usage;
+  const out: NonNullable<LlmSpanEntry['usage']> = {};
+  const input = finiteNumber(usage.input);
+  const output = finiteNumber(usage.output);
+  const cacheRead = finiteNumber(usage.cacheRead);
+  const cacheWrite = finiteNumber(usage.cacheWrite);
+  if (input !== undefined) out.input = input;
+  if (output !== undefined) out.output = output;
+  if (cacheRead !== undefined) out.cacheRead = cacheRead;
+  if (cacheWrite !== undefined) out.cacheWrite = cacheWrite;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function rawFinishReason(raw: Record<string, unknown> | undefined): string | undefined {
+  const stopReason = typeof raw?.stopReason === 'string' ? raw.stopReason : undefined;
+  if (!stopReason) return undefined;
+  if (stopReason === 'toolUse') return 'tool_call';
+  return stopReason;
+}
+
+function findCurrentTurnStart(messages: GenAiChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return index;
+  }
+  return 0;
+}
+
+function emitTranscriptChatSpans(
+  sessionKey: string,
+  session: NonNullable<ReturnType<typeof spanStore.get>>,
+  event: AgentEndEvent,
+  ctx: AgentContext,
+  config: PromptLayerPluginConfig,
+): boolean {
+  const rawMessages = unwrapConversationMessages(event.messages);
+  const fullConversationMessages =
+    rawMessages.length > 0
+      ? normalizeToGenAiInputMessages(rawMessages, { toolResultRole: 'tool' })
+      : buildMessagesFromConversationHistory(event.messages);
+  if (fullConversationMessages.length === 0) return false;
+
+  const currentTurnStart = findCurrentTurnStart(fullConversationMessages);
+  const turnMessages = fullConversationMessages.slice(currentTurnStart);
+  const rawTurnMessages = rawMessages.slice(currentTurnStart);
+  let emitted = false;
+  let previousEndTime = session.startTime;
+
+  for (let index = 0; index < turnMessages.length; index += 1) {
+    const message = turnMessages[index];
+    const raw = rawTurnMessages[index];
+    const messageTime = rawMessageTimestamp(raw);
+    if (message?.role !== 'assistant') {
+      if (messageTime !== undefined) {
+        previousEndTime = Math.max(previousEndTime, messageTime);
+      }
+      continue;
+    }
+
+    const endTime = Math.max(
+      messageTime ?? Date.now(),
+      previousEndTime + FINAL_CHAT_DURATION_FLOOR_MS,
+    );
+    const startTime = Math.max(previousEndTime, endTime - FINAL_CHAT_DURATION_FLOOR_MS);
+    const provider =
+      typeof raw?.provider === 'string'
+        ? raw.provider
+        : session.provider ?? config.providerName ?? 'unknown';
+    const model =
+      typeof raw?.model === 'string'
+        ? raw.model
+        : session.model ?? 'unknown';
+    const responseId = typeof raw?.responseId === 'string' ? raw.responseId : undefined;
+    const llmEntry: LlmSpanEntry = {
+      runId: `${session.lastLlmRunId ?? sessionKey}:message-${currentTurnStart + index}`,
+      sessionKey,
+      agentName: ctx.agentId || 'agent',
+      provider,
+      model,
+      startTime,
+      inputMessages: turnMessages.slice(0, index),
+      systemInstructions: session.latestSystemInstructions ?? [],
+    };
+
+    createChatSpan(
+      llmEntry,
+      llmEntry.inputMessages,
+      [message],
+      session.agentCtx,
+      message.finish_reason ?? rawFinishReason(raw) ?? (hasAssistantText(message) ? 'stop' : undefined),
+      responseId,
+      rawAssistantUsage(raw),
+      endTime,
+    );
+    previousEndTime = endTime;
+    emitted = true;
+  }
+
+  if (emitted) {
+    session.latestAllMessages = fullConversationMessages;
+  }
+  return emitted;
+}
+
+function emitLlmOutputFallbackChatSpan(
+  sessionKey: string,
+  session: NonNullable<ReturnType<typeof spanStore.get>>,
+): void {
+  const completed = (session.completedLlmCalls ?? []).at(-1);
+  if (!completed?.outputMessages || completed.outputMessages.length === 0) return;
+  createChatSpan(
+    completed,
+    completed.inputMessages,
+    completed.outputMessages,
+    session.agentCtx,
+    completed.finishReason,
+    completed.responseId,
+    completed.usage,
+    completed.endTime ?? Date.now(),
+  );
+  session.latestAllMessages = [
+    ...completed.inputMessages,
+    ...completed.outputMessages,
+  ];
+  session.lastChatEndTime = completed.endTime;
+  session.lastChatHadTextOutput = completed.outputMessages.some(hasAssistantText);
+}
 
 function finalizeAgentEndNow(
   event: AgentEndEvent,
   ctx: AgentContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
   logger: Logger,
 ): void {
   const sessionKey =
@@ -60,22 +225,10 @@ function finalizeAgentEndNow(
     typeof event.durationMs === 'number' && Number.isFinite(event.durationMs)
       ? event.durationMs
       : Date.now() - session.startTime;
-  const durationS = durationMs / 1000;
-  const agentName =
-    typeof ctx.agentId === 'string' && ctx.agentId.length > 0
-      ? ctx.agentId
-      : 'agent';
-  const workspace = extractWorkspaceName(
-    typeof ctx.workspaceDir === 'string' ? ctx.workspaceDir : undefined,
-  );
-
   // Close any remaining tool spans (shouldn't happen but safety net)
   // Reverse order: close children before parent (LIFO)
   for (let i = session.toolStack.length - 1; i >= 0; i--) {
     session.toolStack[i].span.end();
-  }
-  for (const toolGroup of session.activeToolGroups.values()) {
-    toolGroup.span.end(toolGroup.endTime);
   }
 
   // Close any pending LLM spans (aborted mid-call)
@@ -88,57 +241,8 @@ function finalizeAgentEndNow(
     session.toolSequence,
   );
 
-  // Cumulative token usage from llm_output hooks
-  const { tokens } = session;
-  if (tokens.input > 0 || tokens.output > 0) {
-    session.agentSpan.setAttribute('gen_ai.usage.input_tokens', tokens.input);
-    session.agentSpan.setAttribute('gen_ai.usage.output_tokens', tokens.output);
-    if (tokens.cacheRead > 0) {
-      session.agentSpan.setAttribute('openclaw.usage.cache_read_tokens', tokens.cacheRead);
-    }
-    if (tokens.cacheWrite > 0) {
-      session.agentSpan.setAttribute('openclaw.usage.cache_write_tokens', tokens.cacheWrite);
-    }
-  }
-
-  // Model/provider from LLM hooks (last seen values)
-  if (session.model) {
-    session.agentSpan.setAttribute('gen_ai.request.model', session.model);
-    session.agentSpan.setAttribute('gen_ai.response.model', session.model);
-    session.agentSpan.setAttribute('model_name', session.model);
-  }
-  if (session.provider) {
-    session.agentSpan.setAttribute('gen_ai.provider.name', session.provider);
-  }
-
-  const fullConversationMessages = buildMessagesFromConversationHistory(event.messages);
-  if (fullConversationMessages.length > 0) {
-    session.latestAllMessages = fullConversationMessages;
-  }
-
-  if (session.latestAllMessages && session.latestAllMessages.length > 0) {
-    session.agentSpan.setAttribute(
-      'pydantic_ai.all_messages',
-      JSON.stringify(session.latestAllMessages),
-    );
-    session.agentSpan.setAttribute(
-      LOGFIRE_JSON_SCHEMA_KEY,
-      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
-    );
-    const finalResult = extractFinalResult(session.latestAllMessages);
-    if (finalResult) {
-      session.agentSpan.setAttribute('final_result', finalResult);
-    }
-  }
-  if (session.latestSystemInstructions && session.latestSystemInstructions.length > 0) {
-    session.agentSpan.setAttribute(
-      'gen_ai.system_instructions',
-      JSON.stringify(session.latestSystemInstructions),
-    );
-    session.agentSpan.setAttribute(
-      LOGFIRE_JSON_SCHEMA_KEY,
-      PYDANTIC_AI_AGENT_ATTRIBUTES_SCHEMA_STRING,
-    );
+  if (!emitTranscriptChatSpans(sessionKey, session, event, ctx, config)) {
+    emitLlmOutputFallbackChatSpan(sessionKey, session);
   }
 
   // Error status
@@ -156,7 +260,7 @@ function finalizeAgentEndNow(
       message: errorMsg,
     });
 
-    // 出错时打出模型与输入摘要，便于排查 LLM timeout 等
+    // Include model and input context to make LLM timeouts easier to debug.
     const modelStr = session.model ?? 'unknown';
     const runIdStr = session.lastLlmRunId ?? '';
     const inputPreview = (session.lastLlmPrompt ?? '').replace(/\s+/g, ' ').trim();
@@ -175,34 +279,8 @@ function finalizeAgentEndNow(
     session.agentSpan.setStatus({ code: SpanStatusCode.OK });
   }
 
-  // End the agent span
   session.agentSpan.end();
 
-  // Record metrics
-  if (config.enableMetrics) {
-    const metricAttrs = {
-      agentName,
-      workspace,
-      providerName: session.provider || config.providerName || 'unknown',
-      requestModel: session.model || '',
-      responseModel: session.model || '',
-      hasError: !!(event.error || !event.success || session.hasError),
-      errorType: event.error
-        ? 'AgentError'
-        : undefined,
-    };
-
-    recordOperationDuration(durationS, metricAttrs);
-  }
-
-  // Log trace link
-  if (config.enableTraceLinks && config.projectUrl) {
-    const traceId = session.agentSpan.spanContext().traceId;
-    const url = buildLogfireTraceUrl(config.projectUrl, traceId);
-    logger.info(`Logfire trace: ${url}`);
-  }
-
-  // Cleanup
   spanStore.delete(sessionKey);
 }
 
@@ -230,7 +308,7 @@ function forceFinalizeDeferredAgentEnd(sessionKey: string): boolean {
 export function handleAgentEnd(
   event: AgentEndEvent,
   ctx: AgentContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
   logger: Logger,
 ): void {
   const sessionKey =
@@ -244,8 +322,8 @@ export function handleAgentEnd(
   const session = spanStore.get(sessionKey);
   if (!session) return;
 
-  // 主路径：真的等到最后一个 llm_output 收尾后再结束 agent span。
-  // 仅当 llm_output 丢失时，watchdog 才兜底强制收尾，避免悬挂 session。
+  // Prefer waiting for the final llm_output before closing the agent span.
+  // The watchdog only forces finalization when llm_output never arrives.
   if (session.llmSpans.size > 0) {
     if (!session.deferredAgentEnd) {
       session.deferredAgentEnd = {

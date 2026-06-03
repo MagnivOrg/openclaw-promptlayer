@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanKind } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleBeforeAgentStart } from './before-agent-start.js';
-import type { BeforeAgentStartEvent, AgentContext } from './before-agent-start.js';
+import { handleBeforePromptBuild } from '../../src/hooks/before-agent-start.js';
+import type { BeforePromptBuildEvent, AgentContext } from '../../src/hooks/before-agent-start.js';
 
 // Hoisted so they're available when vi.mock factory runs
 const { mockAgentSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
@@ -41,7 +41,11 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-describe('handleBeforeAgentStart', () => {
+vi.mock('../../src/otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
+
+describe('handleBeforePromptBuild', () => {
   const config = createTestConfig({ providerName: 'anthropic' });
 
   beforeEach(() => {
@@ -55,7 +59,7 @@ describe('handleBeforeAgentStart', () => {
     spanStore.delete('session-2');
   });
 
-  const baseEvent: BeforeAgentStartEvent = {
+  const baseEvent: BeforePromptBuildEvent = {
     prompt: 'Hello agent',
   };
 
@@ -66,7 +70,7 @@ describe('handleBeforeAgentStart', () => {
       workspaceDir: '/workspaces/marketing',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     const session = spanStore.get('session-1');
     expect(session).toBeDefined();
@@ -78,18 +82,18 @@ describe('handleBeforeAgentStart', () => {
     expect(session!.tokens).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
-  it('stores initial history messages from before_agent_start', () => {
+  it('stores initial history messages from before_prompt_build', () => {
     const ctx: AgentContext = {
       agentId: 'my-agent',
       sessionKey: 'session-1',
     };
 
-    handleBeforeAgentStart(
+    handleBeforePromptBuild(
       {
         ...baseEvent,
         messages: [
-          { role: 'user', content: '历史问题' },
-          { role: 'assistant', content: '历史回答' },
+          { role: 'user', content: 'previous question' },
+          { role: 'assistant', content: 'previous answer' },
         ],
       },
       ctx,
@@ -97,8 +101,8 @@ describe('handleBeforeAgentStart', () => {
     );
 
     expect(spanStore.get('session-1')?.initialHistoryMessages).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: '历史问题' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '历史回答' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'previous question' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'previous answer' }] },
     ]);
   });
 
@@ -110,7 +114,7 @@ describe('handleBeforeAgentStart', () => {
       messageProvider: 'slack',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       'invoke_agent my-agent',
@@ -129,6 +133,12 @@ describe('handleBeforeAgentStart', () => {
       }),
       expect.anything(), // parent context
     );
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(
+      (mockTracerInstance.startSpan.mock.calls as unknown as Array<[string]>).some(([name]) =>
+        String(name).startsWith('agent_turn'),
+      ),
+    ).toBe(false);
   });
 
   it('falls back to sessionId when sessionKey is missing', () => {
@@ -137,7 +147,7 @@ describe('handleBeforeAgentStart', () => {
       sessionId: 'session-2',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(spanStore.get('session-2')).toBeDefined();
   });
@@ -145,7 +155,7 @@ describe('handleBeforeAgentStart', () => {
   it('returns early when neither sessionKey nor sessionId is present', () => {
     const ctx: AgentContext = { agentId: 'my-agent' };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
@@ -153,7 +163,7 @@ describe('handleBeforeAgentStart', () => {
   it('uses "agent" as default name when agentId is missing', () => {
     const ctx: AgentContext = { sessionKey: 'session-1' };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       'invoke_agent agent',
@@ -168,7 +178,7 @@ describe('handleBeforeAgentStart', () => {
       sessionKey: 'session-1',
     };
 
-    handleBeforeAgentStart(baseEvent, ctx, config);
+    handleBeforePromptBuild(baseEvent, ctx, config);
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
       expect.anything(),
@@ -179,5 +189,27 @@ describe('handleBeforeAgentStart', () => {
       }),
       expect.anything(),
     );
+  });
+
+  it('reuses an existing session when multiple root hooks fire', () => {
+    const ctx: AgentContext = {
+      agentId: 'my-agent',
+      sessionKey: 'session-1',
+    };
+
+    handleBeforePromptBuild(baseEvent, ctx, config);
+    handleBeforePromptBuild(
+      {
+        ...baseEvent,
+        messages: [{ role: 'user', content: 'history' }],
+      },
+      ctx,
+      config,
+    );
+
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
+    expect(spanStore.get('session-1')?.initialHistoryMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'history' }] },
+    ]);
   });
 });

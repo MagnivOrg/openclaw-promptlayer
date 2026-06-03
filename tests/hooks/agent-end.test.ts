@@ -1,26 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import {
   mockSpan,
   mockContext,
   createTestConfig,
   createMockLogger,
 } from '../test-helpers.js';
-import { handleAgentEnd } from './agent-end.js';
-import type { AgentEndEvent } from './agent-end.js';
-import type { AgentContext } from './before-agent-start.js';
-
-vi.mock('../metrics/genai-metrics.js', () => ({
-  recordOperationDuration: vi.fn(),
-}));
-
-vi.mock('../trace-link.js', () => ({
-  buildLogfireTraceUrl: vi.fn(() => 'https://logfire.dev/trace/abc'),
-}));
-
-import { recordOperationDuration } from '../metrics/genai-metrics.js';
-import { buildLogfireTraceUrl } from '../trace-link.js';
+import { handleAgentEnd } from '../../src/hooks/agent-end.js';
+import type { AgentEndEvent } from '../../src/hooks/agent-end.js';
+import type { AgentContext } from '../../src/hooks/before-agent-start.js';
 
 function seedSession(
   sessionKey: string,
@@ -39,8 +28,8 @@ function seedSession(
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: overrides?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: overrides?.toolSequence ?? 0,
     hasError: overrides?.hasError ?? false,
@@ -127,59 +116,11 @@ describe('handleAgentEnd', () => {
     expect(agentSpan.setAttribute).toHaveBeenCalledWith('error.type', 'ToolError');
   });
 
-  it('sets cumulative token attributes on agent span', () => {
+  it('does not write request-log aggregate data on the agent span', () => {
     const agentSpan = seedSession('sess-1', {
       tokens: { input: 1000, output: 500, cacheRead: 2000, cacheWrite: 800 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.input_tokens', 1000);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.usage.output_tokens', 500);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_read_tokens', 2000);
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('openclaw.usage.cache_write_tokens', 800);
-  });
-
-  it('omits token attributes when tokens are zero', () => {
-    const agentSpan = seedSession('sess-1');
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasInputTokens = calls.some((call) => call[0] === 'gen_ai.usage.input_tokens');
-    expect(hasInputTokens).toBe(false);
-  });
-
-  it('omits cache token attributes when cache tokens are zero', () => {
-    const agentSpan = seedSession('sess-1', {
-      tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasCacheRead = calls.some((call) => call[0] === 'openclaw.usage.cache_read_tokens');
-    expect(hasCacheRead).toBe(false);
-  });
-
-  it('sets model and provider from session on agent span', () => {
-    const agentSpan = seedSession('sess-1', {
       model: 'claude-sonnet-4-5-20250929',
       provider: 'anthropic',
-      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.request.model', 'claude-sonnet-4-5-20250929');
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.response.model', 'claude-sonnet-4-5-20250929');
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('gen_ai.provider.name', 'anthropic');
-  });
-
-  it('writes pydantic_ai.all_messages and final_result on root span', () => {
-    const agentSpan = seedSession('sess-1', {
-      model: 'claude-sonnet-4-5-20250929',
-      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
     });
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('session should exist');
@@ -198,54 +139,19 @@ describe('handleAgentEnd', () => {
 
     handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
 
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
-      'pydantic_ai.all_messages',
-      expect.stringContaining('"Final answer"'),
-    );
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
-      'final_result',
-      'Final answer',
-    );
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
+    const aggregateAttributes = new Set([
+      'gen_ai.usage.input_tokens',
+      'gen_ai.usage.output_tokens',
+      'openclaw.usage.cache_read_tokens',
+      'openclaw.usage.cache_write_tokens',
+      'gen_ai.request.model',
+      'gen_ai.response.model',
+      'model_name',
+      'gen_ai.output.text',
       'gen_ai.system_instructions',
-      expect.stringContaining('"System prompt"'),
-    );
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
-      'logfire.json_schema',
-      expect.stringContaining('"pydantic_ai.all_messages"'),
-    );
-  });
-
-  it('rebuilds all_messages from agent_end messages when session cache is stale', () => {
-    const agentSpan = seedSession('sess-1');
-    const event: AgentEndEvent = {
-      success: true,
-      messages: [
-        { role: 'user', content: '请帮我写入' },
-        {
-          role: 'assistant',
-          content: [{ type: 'toolCall', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } }],
-        },
-        {
-          role: 'toolResult',
-          toolCallId: 'call-1',
-          toolName: 'write',
-          content: [{ type: 'text', text: '写入成功' }],
-        },
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: '<final>已经写好啦</final>' }],
-        },
-      ],
-    };
-
-    handleAgentEnd(event, baseCtx, createTestConfig(), logger);
-
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith(
-      'pydantic_ai.all_messages',
-      expect.stringContaining('"tool_call_response"'),
-    );
-    expect(agentSpan.setAttribute).toHaveBeenCalledWith('final_result', '已经写好啦');
+    ]);
+    const calls = (agentSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((call) => aggregateAttributes.has(call[0]))).toBe(false);
   });
 
   it('sets duration and tool count attributes', () => {
@@ -278,6 +184,7 @@ describe('handleAgentEnd', () => {
     seedSession('sess-1');
     spanStore.setLlmSpan('sess-1', 'run-orphan', {
       runId: 'run-orphan',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'anthropic',
       model: 'claude-sonnet-4-5-20250929',
@@ -297,6 +204,7 @@ describe('handleAgentEnd', () => {
     const agentSpan = seedSession('sess-1');
     spanStore.setLlmSpan('sess-1', 'run-pending', {
       runId: 'run-pending',
+      sessionKey: 'sess-1',
       agentName: 'my-agent',
       provider: 'google',
       model: 'gemini-3.1-flash-lite-preview',
@@ -313,53 +221,6 @@ describe('handleAgentEnd', () => {
     vi.runAllTimers();
 
     expect(agentSpan.end).toHaveBeenCalled();
-  });
-
-  it('records operation duration metrics when enabled', () => {
-    seedSession('sess-1', { provider: 'anthropic', model: 'claude-sonnet-4-5-20250929' });
-    const config = createTestConfig({ enableMetrics: true });
-    const event: AgentEndEvent = { messages: [], success: true, durationMs: 2000 };
-
-    handleAgentEnd(event, baseCtx, config, logger);
-
-    expect(recordOperationDuration).toHaveBeenCalledWith(
-      2, // 2000ms / 1000 = 2s
-      expect.objectContaining({
-        agentName: 'my-agent',
-        providerName: 'anthropic',
-        requestModel: 'claude-sonnet-4-5-20250929',
-        hasError: false,
-      }),
-    );
-  });
-
-  it('does not record metrics when disabled', () => {
-    seedSession('sess-1');
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig({ enableMetrics: false }), logger);
-
-    expect(recordOperationDuration).not.toHaveBeenCalled();
-  });
-
-  it('logs trace link when enabled and projectUrl is set', () => {
-    seedSession('sess-1');
-    const config = createTestConfig({
-      enableTraceLinks: true,
-      projectUrl: 'https://logfire.pydantic.dev/org/proj',
-    });
-
-    handleAgentEnd(baseEvent, baseCtx, config, logger);
-
-    expect(buildLogfireTraceUrl).toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Logfire trace:'));
-  });
-
-  it('does not log trace link when disabled', () => {
-    seedSession('sess-1');
-
-    handleAgentEnd(baseEvent, baseCtx, createTestConfig(), logger);
-
-    expect(buildLogfireTraceUrl).not.toHaveBeenCalled();
   });
 
   it('deletes the session from span store', () => {

@@ -1,23 +1,21 @@
 {
-  "id": "openclaw-logfire",
+  "id": "openclaw-promptlayer",
   "kind": "observability",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "token": {
+      "apiKey": {
         "type": "string",
-        "description": "Logfire write token. Falls back to LOGFIRE_TOKEN env var."
+        "description": "PromptLayer API key. Falls back to PROMPTLAYER_API_KEY env var."
       },
-      "projectUrl": {
+      "endpoint": {
         "type": "string",
-        "description": "Logfire project URL for clickable trace links."
-      },
-      "region": {
-        "type": "string",
-        "enum": ["us", "eu"],
-        "default": "us",
-        "description": "Logfire region (US or EU endpoint)."
+        "default": "https://api.promptlayer.com/v1/traces",
+        "description": "PromptLayer OTLP/HTTP traces endpoint."
       },
       "environment": {
         "type": "string",
@@ -31,116 +29,13 @@
       },
       "providerName": {
         "type": "string",
-        "description": "GenAI provider name (e.g. 'anthropic', 'openai')."
+        "description": "Default GenAI provider name, e.g. openai or anthropic."
       },
       "providerNameMap": {
         "type": "object",
         "additionalProperties": { "type": "string" },
         "default": {},
-        "description": "Map OpenClaw provider id to OTel name, e.g. {\"gmn\": \"openai\"}."
-      },
-      "captureToolInput": {
-        "type": "boolean",
-        "default": true,
-        "description": "Record tool call arguments as span attributes."
-      },
-      "captureToolOutput": {
-        "type": "boolean",
-        "default": false,
-        "description": "Record tool results as span attributes (verbose)."
-      },
-      "toolInputMaxLength": {
-        "type": "integer",
-        "default": 2048,
-        "description": "Max character length for captured tool input."
-      },
-      "toolOutputMaxLength": {
-        "type": "integer",
-        "default": 512,
-        "description": "Max character length for captured tool output."
-      },
-      "captureStackTraces": {
-        "type": "boolean",
-        "default": true,
-        "description": "Include stack traces in error spans."
-      },
-      "captureMessageContent": {
-        "type": "boolean",
-        "default": false,
-        "description": "Record message text for chat spans and root pydantic_ai.all_messages (privacy-sensitive)."
-      },
-      "captureHistoryMessages": {
-        "type": "boolean",
-        "default": false,
-        "description": "Record multi-turn history so chat spans and root pydantic_ai.all_messages can be reconstructed."
-      },
-      "historyMessagesMaxLength": {
-        "type": "integer",
-        "default": 16384,
-        "description": "Max character length for serialized message arrays stored on spans."
-      },
-      "captureToolDefinitions": {
-        "type": "boolean",
-        "default": false,
-        "description": "Best-effort capture of tool schemas on chat spans when the current hook payload can provide them."
-      },
-      "redactSecrets": {
-        "type": "boolean",
-        "default": true,
-        "description": "Strip API keys, tokens, and JWTs from recorded data."
-      },
-      "distributedTracing": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "enabled": {
-            "type": "boolean",
-            "default": false,
-            "description": "Enable W3C traceparent injection/extraction."
-          },
-          "injectIntoCommands": {
-            "type": "boolean",
-            "default": true,
-            "description": "Inject traceparent into curl/wget/httpie commands."
-          },
-          "extractFromWebhooks": {
-            "type": "boolean",
-            "default": true,
-            "description": "Extract traceparent from inbound webhook headers."
-          },
-          "urlPatterns": {
-            "type": "array",
-            "items": { "type": "string" },
-            "default": ["*"],
-            "description": "Glob patterns for URLs to inject traceparent into."
-          }
-        }
-      },
-      "enableMetrics": {
-        "type": "boolean",
-        "default": true,
-        "description": "Emit token usage and operation duration histograms."
-      },
-      "metricsIntervalMs": {
-        "type": "integer",
-        "default": 60000,
-        "description": "Metrics export interval in milliseconds."
-      },
-      "enableTraceLinks": {
-        "type": "boolean",
-        "default": true,
-        "description": "Log clickable Logfire trace URLs."
-      },
-      "saveHookLogs": {
-        "type": "boolean",
-        "default": false,
-        "description": "Persist raw OpenClaw hook payloads to ~/.openclaw/logs for offline debugging."
-      },
-      "logLevel": {
-        "type": "string",
-        "enum": ["debug", "info", "warn", "error"],
-        "default": "info",
-        "description": "Plugin log verbosity."
+        "description": "Map OpenClaw provider ids to OTEL provider names."
       },
       "resourceAttributes": {
         "type": "object",
@@ -151,7 +46,7 @@
         "type": "string",
         "enum": ["batch", "simple"],
         "default": "batch",
-        "description": "Span processor type. Use 'simple' for debugging."
+        "description": "Span processor type. Use simple for exporter debugging."
       },
       "batchConfig": {
         "type": "object",
@@ -165,17 +60,14 @@
     }
   },
   "uiHints": {
-    "token": {
-      "label": "Write Token",
-      "placeholder": "Set via LOGFIRE_TOKEN env var",
+    "apiKey": {
+      "label": "API Key",
+      "placeholder": "Set via PROMPTLAYER_API_KEY env var",
       "sensitive": true
     },
-    "projectUrl": {
-      "label": "Project URL",
-      "placeholder": "https://logfire.pydantic.dev/org/project"
-    },
-    "region": {
-      "label": "Region"
+    "endpoint": {
+      "label": "OTLP Endpoint",
+      "placeholder": "https://api.promptlayer.com/v1/traces"
     },
     "environment": {
       "label": "Environment",

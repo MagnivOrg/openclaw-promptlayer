@@ -1,12 +1,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleLlmInput } from './llm-input.js';
-import type { LlmInputEvent, LlmContext } from './llm-input.js';
+import { handleLlmInput } from '../../src/hooks/llm-input.js';
+import type { LlmInputEvent, LlmContext } from '../../src/hooks/llm-input.js';
 
-const { mockTracerInstance } = vi.hoisted(() => {
+const { mockAgentSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
+  const span = {
+    end: vi.fn(),
+    spanContext: vi.fn(() => ({ traceId: 'abc', spanId: 'def', traceFlags: 1 })),
+    setAttribute: vi.fn().mockReturnThis(),
+    setStatus: vi.fn().mockReturnThis(),
+    addEvent: vi.fn().mockReturnThis(),
+    addLink: vi.fn().mockReturnThis(),
+    recordException: vi.fn().mockReturnThis(),
+    isRecording: vi.fn(() => true),
+    updateName: vi.fn().mockReturnThis(),
+    setAttributes: vi.fn().mockReturnThis(),
+  };
   return {
-    mockTracerInstance: { startSpan: vi.fn() },
+    mockAgentSpan: span,
+    mockTracerInstance: { startSpan: vi.fn(() => span) },
+    mockSetSpan: vi.fn(() => ({})),
   };
 });
 
@@ -16,9 +30,17 @@ vi.mock('@opentelemetry/api', async () => {
     ...actual,
     trace: {
       getTracer: vi.fn(() => mockTracerInstance),
+      setSpan: mockSetSpan,
+    },
+    context: {
+      active: vi.fn(() => ({})),
     },
   };
 });
+
+vi.mock('../../src/otel.js', () => ({
+  getPromptLayerTracer: vi.fn(() => mockTracerInstance),
+}));
 
 function seedSession(sessionKey: string) {
   const agentSpan = mockSpan();
@@ -27,8 +49,8 @@ function seedSession(sessionKey: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
     hasError: false,
@@ -84,7 +106,7 @@ describe('handleLlmInput', () => {
     handleLlmInput(
       { ...baseEvent, systemPrompt: 'You are helpful' },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const llmEntry = spanStore.getLlmSpan('sess-1', 'run-abc');
@@ -99,6 +121,34 @@ describe('handleLlmInput', () => {
     ]);
     expect(llmEntry!.systemInstructions).toEqual([
       { type: 'text', content: 'You are helpful' },
+    ]);
+  });
+
+  it('stores normalized tool definitions for the LLM span', () => {
+    seedSession('sess-1');
+
+    handleLlmInput(
+      {
+        ...baseEvent,
+        tools: [
+          {
+            name: 'read',
+            description: 'Read a file',
+            input_schema: { type: 'object', properties: { file_path: { type: 'string' } } },
+          },
+        ],
+      },
+      baseCtx,
+      createTestConfig(),
+    );
+
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.toolDefinitions).toEqual([
+      {
+        type: 'function',
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { file_path: { type: 'string' } } },
+      },
     ]);
   });
 
@@ -136,9 +186,9 @@ describe('handleLlmInput', () => {
     );
   });
 
-  it('captures message content into stored phase metadata when enabled', () => {
+  it('captures message content into stored phase metadata', () => {
     seedSession('sess-1');
-    const config = createTestConfig({ captureMessageContent: true });
+    const config = createTestConfig();
     const event = { ...baseEvent, systemPrompt: 'You are helpful' };
 
     handleLlmInput(event, baseCtx, config);
@@ -152,9 +202,9 @@ describe('handleLlmInput', () => {
     });
   });
 
-  it('stores the fully expanded input message list when content capture is enabled', () => {
+  it('stores the fully expanded input message list', () => {
     seedSession('sess-1');
-    const config = createTestConfig({ captureMessageContent: true });
+    const config = createTestConfig();
     const event = { ...baseEvent, systemPrompt: 'System', prompt: 'User turn' };
 
     handleLlmInput(event, baseCtx, config);
@@ -171,7 +221,7 @@ describe('handleLlmInput', () => {
 
   it('does not create any transient chat span during llm_input', () => {
     seedSession('sess-1');
-    const config = createTestConfig({ captureMessageContent: true });
+    const config = createTestConfig();
     const event = { ...baseEvent, systemPrompt: 'System', prompt: 'User turn' };
 
     handleLlmInput(event, baseCtx, config);
@@ -179,32 +229,34 @@ describe('handleLlmInput', () => {
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
 
-  it('falls back to initial session history when llm_input payload omits historyMessages', () => {
+  it('uses stored session history plus the current prompt when raw history is absent', () => {
     seedSession('sess-1');
     const session = spanStore.get('sess-1');
     if (!session) throw new Error('expected session');
     session.initialHistoryMessages = [
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
     ];
 
     handleLlmInput(
-      { ...baseEvent, historyMessages: undefined, prompt: '当前问题' },
+      { ...baseEvent, historyMessages: undefined, prompt: 'current question' },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
     ]);
   });
 
-  it('does not capture message history by default', () => {
+  it('captures the current prompt by default', () => {
     seedSession('sess-1');
 
     handleLlmInput(baseEvent, baseCtx, createTestConfig());
 
-    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([]);
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')?.inputMessages).toEqual([
+      { role: 'user', parts: [{ type: 'text', content: 'Hello' }] },
+    ]);
   });
 
   it('falls back to sessionId when sessionKey is missing', () => {
@@ -222,10 +274,15 @@ describe('handleLlmInput', () => {
     expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
   });
 
-  it('returns early when session is not found', () => {
-    // Don't seed session
+  it('creates a fallback session when the prompt hook did not fire', () => {
     handleLlmInput(baseEvent, baseCtx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan).not.toHaveBeenCalled();
+    expect(mockTracerInstance.startSpan).toHaveBeenCalledWith(
+      'invoke_agent my-agent',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(spanStore.get('sess-1')?.agentSpan).toBe(mockAgentSpan);
+    expect(spanStore.getLlmSpan('sess-1', 'run-abc')).toBeDefined();
   });
 });

@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   safeJsonStringify,
-  truncate,
-  redactSecrets,
   prepareForCapture,
   extractWorkspaceName,
   generateCallId,
@@ -16,7 +14,8 @@ import {
   buildMessagesFromConversationHistory,
   extractConversationOutputMessages,
   extractFinalResult,
-} from './util.js';
+  normalizeToGenAiToolDefinitions,
+} from '../src/util.js';
 
 describe('safeJsonStringify', () => {
   it('serializes objects', () => {
@@ -36,57 +35,16 @@ describe('safeJsonStringify', () => {
   });
 });
 
-describe('truncate', () => {
-  it('does not truncate short strings', () => {
-    expect(truncate('hello', 10)).toBe('hello');
-  });
-
-  it('truncates and adds marker', () => {
-    expect(truncate('hello world', 5)).toBe('hello...[truncated]');
-  });
-});
-
-describe('redactSecrets', () => {
-  it('redacts API keys', () => {
-    const input = 'curl -H "api_key: sk_live_abc123defgh456"';
-    const result = redactSecrets(input);
-    expect(result).not.toContain('sk_live_abc123defgh456');
-    expect(result).toContain('[REDACTED]');
-  });
-
-  it('redacts bearer tokens', () => {
-    const input = 'Authorization: Bearer ghp_abcdef1234567890abcdef';
-    const result = redactSecrets(input);
-    expect(result).not.toContain('ghp_abcdef1234567890abcdef');
-  });
-
-  it('redacts JWTs', () => {
-    const input =
-      'token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0';
-    const result = redactSecrets(input);
-    expect(result).toContain('[REDACTED]');
-  });
-
-  it('leaves non-secret content alone', () => {
-    const input = 'curl https://api.example.com/data -d \'{"name":"test"}\'';
-    expect(redactSecrets(input)).toBe(input);
-  });
-});
-
 describe('prepareForCapture', () => {
-  it('serializes, redacts, and truncates', () => {
-    const result = prepareForCapture(
-      { key: 'api_key: secret123456789012' },
-      50,
-      true,
-    );
-    expect(result).toContain('[REDACTED]');
-    expect(result.length).toBeLessThanOrEqual(50 + '...[truncated]'.length);
+  it('serializes objects without mutating content', () => {
+    const result = prepareForCapture({ key: 'api_key: secret123456789012' });
+    expect(result).toBe('{"key":"api_key: secret123456789012"}');
   });
 
-  it('skips redaction when disabled', () => {
-    const result = prepareForCapture('api_key: mysecret12345678', 200, false);
-    expect(result).toContain('mysecret12345678');
+  it('passes strings through unchanged', () => {
+    expect(prepareForCapture('api_key: mysecret12345678')).toBe(
+      'api_key: mysecret12345678',
+    );
   });
 });
 
@@ -158,12 +116,12 @@ describe('normalizeToGenAiOutputMessages', () => {
       role: 'assistant',
       content: [
         { type: 'thinking', thinking: 'step 1\nstep 2' },
-        { type: 'text', text: '<final>\n你好呀\n</final>' },
+        { type: 'text', text: '<final>\nhello there\n</final>' },
       ],
     });
     expect(out[0].parts).toEqual([
       { type: 'thinking', content: 'step 1\nstep 2' },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 
@@ -173,13 +131,42 @@ describe('normalizeToGenAiOutputMessages', () => {
       content: [
         {
           type: 'text',
-          text: '<think>\n先分析\n</think>\n<final>\n再输出\n</final>',
+          text: '<think>\nanalyze first\n</think>\n<final>\nthen answer\n</final>',
         },
       ],
     });
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先分析' },
-      { type: 'text', content: '再输出' },
+      { type: 'thinking', content: 'analyze first' },
+      { type: 'text', content: 'then answer' },
+    ]);
+  });
+
+  it('converts OpenAI reasoning summaries to thinking parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'I should compute directly.' }],
+        },
+        { type: 'output_text', text: 'The answer is 437.' },
+      ],
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: 'I should compute directly.' },
+      { type: 'text', content: 'The answer is 437.' },
+    ]);
+  });
+
+  it('converts reasoning_content fields to thinking parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      reasoning_content: 'check the file first',
+      content: 'Done.',
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: 'check the file first' },
+      { type: 'text', content: 'Done.' },
     ]);
   });
 
@@ -209,19 +196,19 @@ describe('normalizeToGenAiOutputMessages', () => {
     const out = normalizeToGenAiOutputMessages({
       role: 'assistant',
       content:
-        '{"type":"thinking","thinking":"先读文件"}\n' +
+        '{"type":"thinking","thinking":"read file first"}\n' +
         '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
-        '{"type":"text","text":"<final>你好呀</final>"}',
+        '{"type":"text","text":"<final>hello there</final>"}',
     });
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先读文件' },
+      { type: 'thinking', content: 'read file first' },
       {
         type: 'tool_call',
         id: 'read1',
         name: 'read',
         arguments: { file_path: '/tmp/a' },
       },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 
@@ -237,20 +224,20 @@ describe('normalizeToGenAiInputMessages', () => {
       {
         role: 'assistant',
         content:
-          '{"type":"thinking","thinking":"先看上下文"}\n' +
+          '{"type":"thinking","thinking":"check context first"}\n' +
           '{"type":"toolCall","id":"read1","name":"read","arguments":{"file_path":"/tmp/a"}}\n' +
-          '<final>你好呀</final>',
+          '<final>hello there</final>',
       },
     ]);
     expect(out[0].parts).toEqual([
-      { type: 'thinking', content: '先看上下文' },
+      { type: 'thinking', content: 'check context first' },
       {
         type: 'tool_call',
         id: 'read1',
         name: 'read',
         arguments: { file_path: '/tmp/a' },
       },
-      { type: 'text', content: '你好呀' },
+      { type: 'text', content: 'hello there' },
     ]);
   });
 });
@@ -324,7 +311,7 @@ describe('buildPydanticAiAllMessages', () => {
 });
 
 describe('buildMessagesFromConversationHistory', () => {
-  it('keeps tool responses as user messages for pydantic-ai style rendering', () => {
+  it('keeps tool responses as tool messages for GenAI message rendering', () => {
     expect(
       buildMessagesFromConversationHistory([
         {
@@ -344,7 +331,7 @@ describe('buildMessagesFromConversationHistory', () => {
         parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: { path: '/tmp/a' } }],
       },
       {
-        role: 'user',
+        role: 'tool',
         parts: [{ type: 'tool_call_response', id: 'call-1', name: 'write', result: 'ok' }],
       },
     ]);
@@ -357,18 +344,18 @@ describe('buildMessagesFromConversationHistory', () => {
           role: 'toolResult',
           toolCallId: 'call-2',
           toolName: 'load_skills',
-          content: [{ type: 'text', text: '已加载技能' }],
+          content: [{ type: 'text', text: 'skill loaded' }],
         },
       ]),
     ).toEqual([
       {
-        role: 'user',
+        role: 'tool',
         parts: [
           {
             type: 'tool_call_response',
             id: 'call-2',
             name: 'load_skills',
-            result: '已加载技能',
+            result: 'skill loaded',
           },
         ],
       },
@@ -379,32 +366,75 @@ describe('buildMessagesFromConversationHistory', () => {
 describe('extractConversationOutputMessages', () => {
   it('extracts only messages produced after current input', () => {
     const fullConversation = [
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
-      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'final response' }] },
     ];
     const inputMessages = [
       { role: 'system', parts: [{ type: 'text', content: 'System' }] },
-      { role: 'user', parts: [{ type: 'text', content: '历史消息' }] },
-      { role: 'user', parts: [{ type: 'text', content: '当前问题' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'history message' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'current question' }] },
     ];
 
     expect(extractConversationOutputMessages(fullConversation, inputMessages)).toEqual([
       { role: 'assistant', parts: [{ type: 'tool_call', id: 'call-1', name: 'write', arguments: '{}' }] },
-      { role: 'user', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
-      { role: 'assistant', parts: [{ type: 'text', content: '最终回复' }] },
+      { role: 'tool', parts: [{ type: 'tool_call_response', id: 'call-1', result: 'ok' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'final response' }] },
+    ]);
+  });
+});
+
+describe('normalizeToGenAiToolDefinitions', () => {
+  it('normalizes OpenAI function tool definitions', () => {
+    expect(
+      normalizeToGenAiToolDefinitions([
+        {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'Read a file',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } },
+      },
+    ]);
+  });
+
+  it('normalizes Anthropic-style tool definitions', () => {
+    expect(
+      normalizeToGenAiToolDefinitions([
+        {
+          name: 'read',
+          description: 'Read a file',
+          input_schema: { type: 'object', properties: { file_path: { type: 'string' } } },
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read',
+        description: 'Read a file',
+        parameters: { type: 'object', properties: { file_path: { type: 'string' } } },
+      },
     ]);
   });
 });
 
 describe('buildAssistantMessagesFromTexts', () => {
   it('builds a fallback assistant message from assistantTexts', () => {
-    expect(buildAssistantMessagesFromTexts(['第一段', '第二段'], 'stop')).toEqual([
+    expect(buildAssistantMessagesFromTexts(['first segment', 'second segment'], 'stop')).toEqual([
       {
         role: 'assistant',
-        parts: [{ type: 'text', content: '第一段\n第二段' }],
+        parts: [{ type: 'text', content: 'first segment\nsecond segment' }],
         finish_reason: 'stop',
       },
     ]);

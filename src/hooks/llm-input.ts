@@ -13,8 +13,10 @@ import {
   buildFullInputMessages,
   buildSystemInstructions,
   resolveProviderName,
+  normalizeToGenAiToolDefinitions,
 } from '../util.js';
-import type { LogfirePluginConfig } from '../config.js';
+import type { PromptLayerPluginConfig } from '../config.js';
+import { handleBeforePromptBuild } from './before-agent-start.js';
 
 /** OpenClaw llm_input event payload (minimal — only fields we use). */
 export interface LlmInputEvent {
@@ -26,9 +28,10 @@ export interface LlmInputEvent {
   /** Full message list before this prompt (OpenClaw sends historyMessages). */
   historyMessages?: unknown[];
   imagesCount: number;
+  tools?: unknown[];
 }
 
-/** OpenClaw agent context (shared with before_agent_start, agent_end, etc.). */
+/** OpenClaw agent context shared by LLM and agent lifecycle hooks. */
 export interface LlmContext {
   agentId?: string;
   sessionKey?: string;
@@ -40,12 +43,20 @@ export interface LlmContext {
 export function handleLlmInput(
   event: LlmInputEvent,
   ctx: LlmContext,
-  config: LogfirePluginConfig,
+  config: PromptLayerPluginConfig,
 ): void {
   const sessionKey = ctx.sessionKey ?? ctx.sessionId;
   if (!sessionKey) return;
 
-  const session = spanStore.get(sessionKey);
+  let session = spanStore.get(sessionKey);
+  if (!session) {
+    handleBeforePromptBuild(
+      { prompt: event.prompt, messages: event.historyMessages },
+      ctx,
+      config,
+    );
+    session = spanStore.get(sessionKey);
+  }
   if (!session) return;
 
   const resolvedProvider =
@@ -56,13 +67,9 @@ export function handleLlmInput(
 
   session.model = event.model;
   session.provider = resolvedProvider;
-  // 保存最后一次 LLM 调用的 runId 与输入摘要，供 agent 出错时日志使用
+  // Keep the latest LLM call id and input preview for agent error logs.
   session.lastLlmRunId = event.runId;
-  session.lastLlmPrompt = prepareForCapture(
-    event.prompt,
-    600,
-    config.redactSecrets,
-  );
+  session.lastLlmPrompt = prepareForCapture(event.prompt);
 
   if (resolvedProvider && config.providerName === '') {
     session.agentSpan.setAttribute('gen_ai.provider.name', resolvedProvider);
@@ -72,43 +79,36 @@ export function handleLlmInput(
   const hasRawHistoryMessages =
     Array.isArray(event.historyMessages) && event.historyMessages.length > 0;
 
-  // 完整 gen_ai.input.messages（system + 历史 + 当前用户轮）供 Logfire 正确解析多轮/工具/思考
-  let fullInput: ReturnType<typeof buildFullInputMessages> = [];
-  if (config.captureMessageContent || config.captureHistoryMessages) {
-    if (hasRawHistoryMessages) {
-      fullInput = buildFullInputMessages(
-        event.systemPrompt,
-        event.historyMessages,
-        event.prompt,
-      );
-    } else {
-      const normalizedSessionHistory = session.initialHistoryMessages ?? [];
-      const hasSystemMessageInHistory = normalizedSessionHistory.some(
-        (message) => message.role === 'system',
-      );
-      fullInput = [
-        ...(hasSystemMessageInHistory
-          ? []
-          : systemInstructions.length > 0
+  const historyMessages = hasRawHistoryMessages
+    ? buildFullInputMessages(event.systemPrompt, event.historyMessages, event.prompt)
+    : session.initialHistoryMessages ?? [];
+  const hasSystemMessageInHistory = historyMessages.some(
+    (message) => message.role === 'system',
+  );
+  const fullInput =
+    hasRawHistoryMessages
+      ? historyMessages
+      : [
+          ...(!hasSystemMessageInHistory && systemInstructions.length > 0
             ? [{ role: 'system', parts: systemInstructions }]
             : []),
-        ...normalizedSessionHistory,
-        {
-          role: 'user',
-          parts: [{ type: 'text', content: event.prompt }],
-        },
-      ];
-    }
-  }
+          ...historyMessages,
+          {
+            role: 'user',
+            parts: [{ type: 'text', content: event.prompt }],
+          },
+        ];
 
   spanStore.setLlmSpan(sessionKey, event.runId, {
     runId: event.runId,
+    sessionKey,
     agentName: ctx.agentId || 'agent',
     provider: resolvedProvider,
     model: event.model,
     startTime: Date.now(),
     inputMessages: fullInput,
     systemInstructions,
+    toolDefinitions: normalizeToGenAiToolDefinitions(event.tools),
   });
 
   session.latestSystemInstructions = systemInstructions;

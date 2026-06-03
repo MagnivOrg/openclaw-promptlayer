@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleToolResultPersist } from './tool-result-persist.js';
-import type { ToolResultPersistEvent, ToolResultPersistContext } from './tool-result-persist.js';
+import { handleToolResultPersist } from '../../src/hooks/tool-result-persist.js';
+import type { ToolResultPersistEvent, ToolResultPersistContext } from '../../src/hooks/tool-result-persist.js';
 
 function seedSessionWithTool(sessionKey: string, toolName: string) {
   const toolSpan = mockSpan();
@@ -13,8 +13,8 @@ function seedSessionWithTool(sessionKey: string, toolName: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
-    activeToolGroups: new Map(),
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 1,
     hasError: false,
@@ -82,34 +82,15 @@ describe('handleToolResultPersist', () => {
     );
   });
 
-  it('captures tool output when captureToolOutput is enabled', () => {
+  it('records tool output as a GenAI attribute', () => {
     const toolSpan = seedSessionWithTool('sess-1', 'Read');
-    const config = createTestConfig({ captureToolOutput: true });
 
-    handleToolResultPersist(baseEvent, baseCtx, config);
+    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
 
     expect(toolSpan.setAttribute).toHaveBeenCalledWith(
       'gen_ai.tool.call.result',
       expect.any(String),
     );
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'tool_response',
-      expect.any(String),
-    );
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'logfire.json_schema',
-      expect.stringContaining('"tool_response"'),
-    );
-  });
-
-  it('does not capture tool output by default', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-
-    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
-
-    const calls = (toolSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasResult = calls.some(([key]: [string]) => key === 'gen_ai.tool.call.result');
-    expect(hasResult).toBe(false);
   });
 
   it('handles object messages (serializes to JSON for size)', () => {
@@ -137,8 +118,8 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedLlmCalls: [],
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 2,
       hasError: false,
@@ -178,8 +159,8 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedLlmCalls: [],
       completedToolCalls: [],
-      activeToolGroups: new Map(),
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
       hasError: false,
@@ -208,44 +189,4 @@ describe('handleToolResultPersist', () => {
     expect(toolSpan.end).toHaveBeenCalled();
   });
 
-  it('captures tool output when message content capture is enabled', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-
-    handleToolResultPersist(
-      baseEvent,
-      baseCtx,
-      createTestConfig({ captureMessageContent: true }),
-    );
-
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'gen_ai.tool.call.result',
-      expect.any(String),
-    );
-  });
-
-  it('finalizes the running tools group when the last tool completes', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-    const runningToolsSpan = mockSpan();
-    const session = spanStore.get('sess-1');
-    if (!session) throw new Error('expected session');
-    session.activeToolGroups.set('run-1', {
-      span: runningToolsSpan,
-      ctx: mockContext(),
-      runId: 'run-1',
-      toolNames: ['Read'],
-      openToolCount: 1,
-      startTime: Date.now() - 150,
-    });
-
-    const activeTool = spanStore.peekTool('sess-1');
-    if (!activeTool) throw new Error('expected active tool');
-    activeTool.runId = 'run-1';
-
-    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
-
-    expect(toolSpan.end).toHaveBeenCalled();
-    expect(runningToolsSpan.setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
-    expect(runningToolsSpan.end).toHaveBeenCalled();
-    expect(spanStore.getToolGroup('sess-1', 'run-1')).toBeUndefined();
-  });
 });
