@@ -1,13 +1,12 @@
 # Contributing to @promptlayer/openclaw-promptlayer
 
-Thanks for your interest in contributing. This guide covers setup, development, testing, and review expectations for the PromptLayer OpenClaw integration.
+Thanks for your interest in contributing. This guide covers setup, development, and review expectations for the PromptLayer OpenClaw integration.
 
 ## Prerequisites
 
 - Node.js `>= 20`
 - npm
 - Git
-- OpenClaw `>= 2026.2.1` for local integration testing
 
 ## Setup
 
@@ -17,14 +16,6 @@ cd openclaw-promptlayer
 npm install
 ```
 
-Verify the checkout:
-
-```bash
-npm run typecheck
-npm run lint
-npm test
-```
-
 ## Project Structure
 
 ```text
@@ -32,8 +23,8 @@ src/
   index.ts                  Plugin entry point: hook wiring and lifecycle
   config.ts                 Typed configuration with PromptLayer env fallbacks
   otel.ts                   OTEL trace exporter setup for PromptLayer
-  gen-ai-span-attributes.ts GenAI prompt/completion and usage attributes
-  util.ts                   Message normalization, JSON handling, truncation, redaction
+  gen-ai-span-attributes.ts GenAI usage attributes
+  util.ts                   Message normalization and JSON handling
   hooks/
     before-agent-start.ts   Root invoke_agent span creation
     llm-input.ts            Pending chat span context capture
@@ -54,7 +45,6 @@ Create a branch, make focused changes, and verify before opening a PR:
 git checkout -b feat/my-change
 npm run typecheck
 npm run lint
-npm test
 git commit -m "feat: describe the change"
 git push -u origin feat/my-change
 ```
@@ -66,7 +56,6 @@ Use conventional commit prefixes when practical:
 | `feat:` | New functionality |
 | `fix:` | Bug fixes |
 | `docs:` | Documentation-only changes |
-| `test:` | Test additions or fixes |
 | `refactor:` | Behavior-preserving code restructuring |
 | `chore:` | Build, CI, or metadata changes |
 
@@ -79,7 +68,7 @@ This plugin follows OpenTelemetry GenAI semantic conventions where they fit Open
 - Use `gen_ai.*` for standard GenAI attributes.
 - Use `openclaw.*` for OpenClaw-specific metadata.
 - Use `session.id` and `gen_ai.conversation.id` for the OpenClaw session key.
-- Keep message payload capture behind config flags.
+- Record message payloads using modern GenAI message attributes.
 
 Common attributes:
 
@@ -122,55 +111,13 @@ api.on('hook_name', (event, ctx) => {
 });
 ```
 
-### Privacy Controls
+### Payload Handling
 
 Captured messages and tool payloads can contain sensitive data.
 
-- Check `captureMessageContent`, `captureHistoryMessages`, `captureToolInput`, and `captureToolOutput` before recording payloads.
-- Use `prepareForCapture()` for serialized payloads so redaction and truncation are applied consistently.
-- Keep `redactSecrets` enabled by default.
-
-## Writing Tests
-
-Tests live next to source as `*.test.ts`.
-
-Test these areas:
-
-- Config defaults, env var fallbacks, and explicit overrides
-- Message normalization for OpenClaw/OpenAI/Anthropic-style payloads
-- Span store behavior, including LIFO tool closure and cleanup
-- Hook behavior for root, chat, and tool spans
-- Redaction and truncation behavior
-- Deferred agent finalization and final-answer chat reconstruction
-
-Avoid testing OpenTelemetry SDK internals or exact OTLP wire format.
-
-All test names, fixtures, and inline comments should be English-only.
-
-## Local Testing With OpenClaw
-
-To test against a real OpenClaw instance:
-
-```bash
-ln -s "$(pwd)" ~/.openclaw/extensions/openclaw-promptlayer
-export PROMPTLAYER_API_KEY="<your-api-key>"
-openclaw restart
-openclaw plugins list
-```
-
-Or add the checkout path to `plugins.load.paths` in `openclaw.json`:
-
-```json
-{
-  "plugins": {
-    "load": {
-      "paths": ["/absolute/path/to/openclaw-promptlayer"]
-    }
-  }
-}
-```
-
-The plugin should show as `openclaw-promptlayer`.
+- Use `prepareForCapture()` for serialized payload attributes.
+- Do not truncate serialized JSON attributes; downstream ingestion expects valid JSON.
+- Keep API keys in environment variables and do not commit secrets into config.
 
 ## Documentation
 

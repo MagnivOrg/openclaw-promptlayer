@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig, createMockLogger } from '../test-helpers.js';
-import { handleLlmOutput } from './llm-output.js';
-import type { LlmOutputEvent } from './llm-output.js';
-import type { LlmContext } from './llm-input.js';
-import { handleAgentEnd } from './agent-end.js';
+import { handleLlmOutput } from '../../src/hooks/llm-output.js';
+import type { LlmOutputEvent } from '../../src/hooks/llm-output.js';
+import type { LlmContext } from '../../src/hooks/llm-input.js';
+import { handleAgentEnd } from '../../src/hooks/agent-end.js';
 
 const { mockTracerInstance, createdSpans } = vi.hoisted(() => {
   interface MockTestSpan {
@@ -64,7 +64,7 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-vi.mock('../otel.js', () => ({
+vi.mock('../../src/otel.js', () => ({
   getPromptLayerTracer: vi.fn(() => mockTracerInstance),
 }));
 
@@ -77,6 +77,7 @@ function seedSessionWithLlm(sessionKey: string, runId: string) {
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
@@ -133,10 +134,19 @@ describe('handleLlmOutput', () => {
     workspaceDir: '/workspaces/marketing',
   };
 
+  function parseMessageAttr(value: unknown) {
+    expect(typeof value).toBe('string');
+    return JSON.parse(value as string) as Array<{
+      role: string;
+      parts: Array<Record<string, unknown>>;
+      finish_reason?: string;
+    }>;
+  }
+
   it('accumulates tokens on the session', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
@@ -148,7 +158,7 @@ describe('handleLlmOutput', () => {
   it('accumulates across multiple LLM calls', () => {
     seedSessionWithLlm('sess-1', 'run-1');
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
     spanStore.setLlmSpan('sess-1', 'run-2', {
       runId: 'run-2',
@@ -216,7 +226,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
@@ -228,6 +238,65 @@ describe('handleLlmOutput', () => {
         parts: [{ type: 'text', content: 'Hi there' }],
         finish_reason: 'stop',
       },
+    ]);
+  });
+
+  it('writes thinking output separately from final content', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        lastAssistant: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'inspect the input first' },
+            { type: 'text', text: '<final>Final answer</final>' },
+          ],
+        },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig(),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    const outputMessages = parseMessageAttr(spanAttributes['gen_ai.output.messages']);
+    expect(outputMessages[0].parts).toEqual([
+      { type: 'thinking', content: 'inspect the input first' },
+      { type: 'text', content: 'Final answer' },
+    ]);
+  });
+
+  it('writes OpenAI reasoning summaries as thinking output', () => {
+    seedSessionWithLlm('sess-1', 'run-1');
+
+    handleLlmOutput(
+      {
+        ...baseEvent,
+        provider: 'openai',
+        model: 'gpt-5.5',
+        lastAssistant: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'reasoning',
+              summary: [{ type: 'summary_text', text: 'I should compute directly.' }],
+            },
+            { type: 'output_text', text: '19 times 23 is 437.' },
+          ],
+        },
+        finishReason: 'stop',
+      },
+      baseCtx,
+      createTestConfig(),
+    );
+
+    const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
+    const outputMessages = parseMessageAttr(spanAttributes['gen_ai.output.messages']);
+    expect(outputMessages[0].parts).toEqual([
+      { type: 'thinking', content: 'I should compute directly.' },
+      { type: 'text', content: '19 times 23 is 437.' },
     ]);
   });
 
@@ -251,7 +320,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
@@ -270,7 +339,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
@@ -310,7 +379,7 @@ describe('handleLlmOutput', () => {
         ],
       },
       ctx: { agentId: 'my-agent', sessionKey: 'sess-1', workspaceDir: '/workspaces/marketing' },
-      config: createTestConfig({ captureMessageContent: true }),
+      config: createTestConfig(),
       logger: createMockLogger(),
       requestedAt: Date.now(),
     };
@@ -343,7 +412,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     expect(createdSpans).toHaveLength(2);
@@ -355,21 +424,25 @@ describe('handleLlmOutput', () => {
 
     const firstAttributes = createdSpans[0].options.attributes as Record<string, string | string[]>;
     expect(firstAttributes['gen_ai.operation.name']).toBe('chat');
-    expect(firstAttributes['gen_ai.output.messages']).toContain('"tool_call"');
-    expect(firstAttributes['gen_ai.completion.0.tool_calls']).toContain('write');
+    const firstOutputMessages = parseMessageAttr(firstAttributes['gen_ai.output.messages']);
+    expect(firstOutputMessages[0].parts).toEqual([
+      { type: 'tool_call', id: 'call-1', name: 'write', arguments: { file: '/tmp/a' } },
+    ]);
     expect(firstAttributes['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
 
     const finalAttributes = createdSpans[1].options.attributes as Record<string, string | string[]>;
     expect(finalAttributes['gen_ai.operation.name']).toBe('chat');
-    expect(finalAttributes['gen_ai.input.messages']).toContain('write the file');
-    expect(finalAttributes['gen_ai.input.messages']).toContain('"tool_call"');
-    expect(finalAttributes['gen_ai.input.messages']).toContain('"tool_call_response"');
+    const finalInputMessages = parseMessageAttr(finalAttributes['gen_ai.input.messages']);
+    const finalOutputMessages = parseMessageAttr(finalAttributes['gen_ai.output.messages']);
+    expect(finalInputMessages.flatMap((message) => message.parts).map((part) => part.type)).toEqual([
+      'text',
+      'tool_call',
+      'tool_call_response',
+    ]);
+    expect(finalInputMessages[0].parts[0].content).toBe('write the file');
+    expect(finalOutputMessages[0].parts).toEqual([{ type: 'text', content: 'done writing' }]);
     expect(finalAttributes['gen_ai.output.messages']).toContain('done writing');
     expect(finalAttributes['gen_ai.output.messages']).not.toContain('last llm output');
-    expect(finalAttributes['gen_ai.prompt.0.content']).toBe('write the file');
-    expect(finalAttributes['gen_ai.prompt.1.tool_calls']).toContain('write');
-    expect(finalAttributes['gen_ai.prompt.2.tool_call_id']).toBe('call-1');
-    expect(finalAttributes['gen_ai.completion.0.content']).toBe('done writing');
     expect(finalAttributes['gen_ai.response.finish_reasons']).toEqual(['stop']);
   });
 
@@ -434,7 +507,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     expect(createdSpans).toHaveLength(2);
@@ -471,7 +544,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string>;
@@ -490,7 +563,7 @@ describe('handleLlmOutput', () => {
         finishReason: 'stop',
       },
       baseCtx,
-      createTestConfig({ captureMessageContent: true }),
+      createTestConfig(),
     );
 
     const spanAttributes = createdSpans[0].options.attributes as Record<string, unknown>;
@@ -555,6 +628,7 @@ describe('handleLlmOutput', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedLlmCalls: [],
       completedToolCalls: [],
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
@@ -565,7 +639,7 @@ describe('handleLlmOutput', () => {
       initialHistoryMessages: [],
     });
 
-    handleLlmOutput(baseEvent, baseCtx, createTestConfig({ captureMessageContent: true }));
+    handleLlmOutput(baseEvent, baseCtx, createTestConfig());
 
     const session = spanStore.get('sess-1')!;
     expect(session.tokens.input).toBe(100);
@@ -573,7 +647,8 @@ describe('handleLlmOutput', () => {
     expect(createdSpans).toHaveLength(1);
     const spanAttributes = createdSpans[0].options.attributes as Record<string, string | number>;
     expect(spanAttributes['openclaw.llm.run_id']).toBe('run-1');
-    expect(spanAttributes['gen_ai.completion.0.content']).toBe('Hello!');
+    const outputMessages = parseMessageAttr(spanAttributes['gen_ai.output.messages']);
+    expect(outputMessages[0].parts).toEqual([{ type: 'text', content: 'Hello!' }]);
     expect(spanAttributes['gen_ai.usage.input_tokens']).toBe(100);
     expect(spanAttributes['gen_ai.usage.output_tokens']).toBe(50);
   });

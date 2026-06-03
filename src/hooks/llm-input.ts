@@ -69,11 +69,7 @@ export function handleLlmInput(
   session.provider = resolvedProvider;
   // Keep the latest LLM call id and input preview for agent error logs.
   session.lastLlmRunId = event.runId;
-  session.lastLlmPrompt = prepareForCapture(
-    event.prompt,
-    600,
-    config.redactSecrets,
-  );
+  session.lastLlmPrompt = prepareForCapture(event.prompt);
 
   if (resolvedProvider && config.providerName === '') {
     session.agentSpan.setAttribute('gen_ai.provider.name', resolvedProvider);
@@ -83,35 +79,25 @@ export function handleLlmInput(
   const hasRawHistoryMessages =
     Array.isArray(event.historyMessages) && event.historyMessages.length > 0;
 
-  // By default, capture only this turn's prompt. Full history can be very large
-  // and is opt-in via captureHistoryMessages.
-  let fullInput: ReturnType<typeof buildFullInputMessages> = [];
-  if (config.captureMessageContent || config.captureHistoryMessages) {
-    if (config.captureHistoryMessages && hasRawHistoryMessages) {
-      fullInput = buildFullInputMessages(
-        event.systemPrompt,
-        event.historyMessages,
-        event.prompt,
-      );
-    } else {
-      const initialHistoryMessages = config.captureHistoryMessages
-        ? session.initialHistoryMessages ?? []
-        : [];
-      const hasSystemMessageInHistory = initialHistoryMessages.some(
-        (message) => message.role === 'system',
-      );
-      fullInput = [
-        ...(!hasSystemMessageInHistory && systemInstructions.length > 0
-          ? [{ role: 'system', parts: systemInstructions }]
-          : []),
-        ...initialHistoryMessages,
-        {
-          role: 'user',
-          parts: [{ type: 'text', content: event.prompt }],
-        },
-      ];
-    }
-  }
+  const historyMessages = hasRawHistoryMessages
+    ? buildFullInputMessages(event.systemPrompt, event.historyMessages, event.prompt)
+    : session.initialHistoryMessages ?? [];
+  const hasSystemMessageInHistory = historyMessages.some(
+    (message) => message.role === 'system',
+  );
+  const fullInput =
+    hasRawHistoryMessages
+      ? historyMessages
+      : [
+          ...(!hasSystemMessageInHistory && systemInstructions.length > 0
+            ? [{ role: 'system', parts: systemInstructions }]
+            : []),
+          ...historyMessages,
+          {
+            role: 'user',
+            parts: [{ type: 'text', content: event.prompt }],
+          },
+        ];
 
   spanStore.setLlmSpan(sessionKey, event.runId, {
     runId: event.runId,

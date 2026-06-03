@@ -13,14 +13,6 @@ export interface PromptLayerPluginConfig {
   serviceName: string;
   providerName: string;
   providerNameMap: Record<string, string>;
-  captureToolInput: boolean;
-  captureToolOutput: boolean;
-  toolInputMaxLength: number;
-  toolOutputMaxLength: number;
-  captureMessageContent: boolean;
-  captureHistoryMessages: boolean;
-  historyMessagesMaxLength: number;
-  redactSecrets: boolean;
   resourceAttributes: Record<string, string>;
   spanProcessorType: 'batch' | 'simple';
   batchConfig: BatchConfig;
@@ -33,14 +25,6 @@ const DEFAULTS: PromptLayerPluginConfig = {
   serviceName: 'openclaw-agent',
   providerName: '',
   providerNameMap: {},
-  captureToolInput: true,
-  captureToolOutput: false,
-  toolInputMaxLength: 2048,
-  toolOutputMaxLength: 512,
-  captureMessageContent: false,
-  captureHistoryMessages: false,
-  historyMessagesMaxLength: 16384,
-  redactSecrets: true,
   resourceAttributes: {},
   spanProcessorType: 'batch',
   batchConfig: {
@@ -70,20 +54,6 @@ export function resolveConfig(
       DEFAULTS.providerName,
     providerNameMap:
       asStringRecord(raw.providerNameMap) ?? DEFAULTS.providerNameMap,
-    captureToolInput: asBool(raw.captureToolInput) ?? DEFAULTS.captureToolInput,
-    captureToolOutput:
-      asBool(raw.captureToolOutput) ?? DEFAULTS.captureToolOutput,
-    toolInputMaxLength:
-      asInt(raw.toolInputMaxLength) ?? DEFAULTS.toolInputMaxLength,
-    toolOutputMaxLength:
-      asInt(raw.toolOutputMaxLength) ?? DEFAULTS.toolOutputMaxLength,
-    captureMessageContent:
-      asBool(raw.captureMessageContent) ?? DEFAULTS.captureMessageContent,
-    captureHistoryMessages:
-      asBool(raw.captureHistoryMessages) ?? DEFAULTS.captureHistoryMessages,
-    historyMessagesMaxLength:
-      asInt(raw.historyMessagesMaxLength) ?? DEFAULTS.historyMessagesMaxLength,
-    redactSecrets: asBool(raw.redactSecrets) ?? DEFAULTS.redactSecrets,
     resourceAttributes:
       asStringRecord(raw.resourceAttributes) ?? DEFAULTS.resourceAttributes,
     spanProcessorType:
@@ -104,10 +74,6 @@ export function resolveConfig(
 
 function asString(v: unknown): string {
   return typeof v === 'string' ? v : '';
-}
-
-function asBool(v: unknown): boolean | undefined {
-  return typeof v === 'boolean' ? v : undefined;
 }
 
 function asInt(v: unknown): number | undefined {

@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   safeJsonStringify,
-  truncate,
-  redactSecrets,
   prepareForCapture,
   extractWorkspaceName,
   generateCallId,
@@ -17,7 +15,7 @@ import {
   extractConversationOutputMessages,
   extractFinalResult,
   normalizeToGenAiToolDefinitions,
-} from './util.js';
+} from '../src/util.js';
 
 describe('safeJsonStringify', () => {
   it('serializes objects', () => {
@@ -37,57 +35,16 @@ describe('safeJsonStringify', () => {
   });
 });
 
-describe('truncate', () => {
-  it('does not truncate short strings', () => {
-    expect(truncate('hello', 10)).toBe('hello');
-  });
-
-  it('truncates and adds marker', () => {
-    expect(truncate('hello world', 5)).toBe('hello...[truncated]');
-  });
-});
-
-describe('redactSecrets', () => {
-  it('redacts API keys', () => {
-    const input = 'curl -H "api_key: sk_live_abc123defgh456"';
-    const result = redactSecrets(input);
-    expect(result).not.toContain('sk_live_abc123defgh456');
-    expect(result).toContain('[REDACTED]');
-  });
-
-  it('redacts bearer tokens', () => {
-    const input = 'Authorization: Bearer ghp_abcdef1234567890abcdef';
-    const result = redactSecrets(input);
-    expect(result).not.toContain('ghp_abcdef1234567890abcdef');
-  });
-
-  it('redacts JWTs', () => {
-    const input =
-      'token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0';
-    const result = redactSecrets(input);
-    expect(result).toContain('[REDACTED]');
-  });
-
-  it('leaves non-secret content alone', () => {
-    const input = 'curl https://api.example.com/data -d \'{"name":"test"}\'';
-    expect(redactSecrets(input)).toBe(input);
-  });
-});
-
 describe('prepareForCapture', () => {
-  it('serializes, redacts, and truncates', () => {
-    const result = prepareForCapture(
-      { key: 'api_key: secret123456789012' },
-      50,
-      true,
-    );
-    expect(result).toContain('[REDACTED]');
-    expect(result.length).toBeLessThanOrEqual(50 + '...[truncated]'.length);
+  it('serializes objects without mutating content', () => {
+    const result = prepareForCapture({ key: 'api_key: secret123456789012' });
+    expect(result).toBe('{"key":"api_key: secret123456789012"}');
   });
 
-  it('skips redaction when disabled', () => {
-    const result = prepareForCapture('api_key: mysecret12345678', 200, false);
-    expect(result).toContain('mysecret12345678');
+  it('passes strings through unchanged', () => {
+    expect(prepareForCapture('api_key: mysecret12345678')).toBe(
+      'api_key: mysecret12345678',
+    );
   });
 });
 
@@ -181,6 +138,35 @@ describe('normalizeToGenAiOutputMessages', () => {
     expect(out[0].parts).toEqual([
       { type: 'thinking', content: 'analyze first' },
       { type: 'text', content: 'then answer' },
+    ]);
+  });
+
+  it('converts OpenAI reasoning summaries to thinking parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      content: [
+        {
+          type: 'reasoning',
+          summary: [{ type: 'summary_text', text: 'I should compute directly.' }],
+        },
+        { type: 'output_text', text: 'The answer is 437.' },
+      ],
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: 'I should compute directly.' },
+      { type: 'text', content: 'The answer is 437.' },
+    ]);
+  });
+
+  it('converts reasoning_content fields to thinking parts', () => {
+    const out = normalizeToGenAiOutputMessages({
+      role: 'assistant',
+      reasoning_content: 'check the file first',
+      content: 'Done.',
+    });
+    expect(out[0].parts).toEqual([
+      { type: 'thinking', content: 'check the file first' },
+      { type: 'text', content: 'Done.' },
     ]);
   });
 

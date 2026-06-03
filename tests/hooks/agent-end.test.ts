@@ -1,15 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import {
   mockSpan,
   mockContext,
   createTestConfig,
   createMockLogger,
 } from '../test-helpers.js';
-import { handleAgentEnd } from './agent-end.js';
-import type { AgentEndEvent } from './agent-end.js';
-import type { AgentContext } from './before-agent-start.js';
+import { handleAgentEnd } from '../../src/hooks/agent-end.js';
+import type { AgentEndEvent } from '../../src/hooks/agent-end.js';
+import type { AgentContext } from '../../src/hooks/before-agent-start.js';
 
 function seedSession(
   sessionKey: string,
@@ -28,6 +28,7 @@ function seedSession(
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
     tokens: overrides?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: overrides?.toolSequence ?? 0,

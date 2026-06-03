@@ -37,7 +37,7 @@ export interface ToolContext {
 export function handleBeforeToolCall(
   event: BeforeToolCallEvent,
   ctx: ToolContext,
-  config: PromptLayerPluginConfig,
+  _config: PromptLayerPluginConfig,
 ): void {
   const sessionKey =
     typeof ctx.sessionKey === 'string' && ctx.sessionKey.length > 0
@@ -92,14 +92,8 @@ export function handleBeforeToolCall(
     'openclaw.tool.sequence': session.toolSequence,
   };
 
-  // Opt-in: capture tool arguments
-  if ((config.captureToolInput || config.captureMessageContent) && event.params !== undefined) {
-    const serializedArguments = prepareForCapture(
-      event.params,
-      config.toolInputMaxLength,
-      config.redactSecrets,
-    );
-    attributes['gen_ai.tool.call.arguments'] = serializedArguments;
+  if (event.params !== undefined) {
+    attributes['gen_ai.tool.call.arguments'] = prepareForCapture(event.params);
   }
 
   const toolSpan = tracer.startSpan(

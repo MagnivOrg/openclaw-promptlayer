@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveConfig } from './config.js';
+import { resolveConfig } from '../src/config.js';
 
 describe('resolveConfig', () => {
   const originalEnv = process.env;
@@ -18,10 +18,6 @@ describe('resolveConfig', () => {
     expect(config.endpoint).toBe('https://api.promptlayer.com/v1/traces');
     expect(config.serviceName).toBe('openclaw-agent');
     expect(config.environment).toBe('development');
-    expect(config.captureToolInput).toBe(true);
-    expect(config.captureToolOutput).toBe(false);
-    expect(config.captureMessageContent).toBe(false);
-    expect(config.redactSecrets).toBe(true);
     expect(config.spanProcessorType).toBe('batch');
   });
 

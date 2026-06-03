@@ -120,7 +120,6 @@ export function handleLlmOutput(
           event.responseId,
           usage,
           llmEndTime,
-          config,
         );
       }
       session.latestAllMessages =

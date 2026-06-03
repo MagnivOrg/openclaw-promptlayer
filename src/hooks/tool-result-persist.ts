@@ -38,7 +38,7 @@ export interface ToolResultPersistContext {
 export function handleToolResultPersist(
   event: ToolResultPersistEvent,
   ctx: ToolResultPersistContext,
-  config: PromptLayerPluginConfig,
+  _config: PromptLayerPluginConfig,
 ): void {
   const sessionKey =
     typeof ctx.sessionKey === 'string' && ctx.sessionKey.length > 0
@@ -64,18 +64,10 @@ export function handleToolResultPersist(
           : safeJsonStringify(event.message);
       entry.span.setAttribute('openclaw.tool.output_size', resultStr.length);
 
-      // Opt-in: capture tool output
-      if (config.captureToolOutput || config.captureMessageContent) {
-        const serializedResult = prepareForCapture(
-          event.message,
-          config.toolOutputMaxLength,
-          config.redactSecrets,
-        );
-        entry.span.setAttribute(
-          'gen_ai.tool.call.result',
-          serializedResult,
-        );
-      }
+      entry.span.setAttribute(
+        'gen_ai.tool.call.result',
+        prepareForCapture(event.message),
+      );
     }
 
     // Tool-level errors are not available in this hook's event payload.

@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanKind } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleBeforeToolCall } from './before-tool-call.js';
-import type { BeforeToolCallEvent, ToolContext } from './before-tool-call.js';
+import { handleBeforeToolCall } from '../../src/hooks/before-tool-call.js';
+import type { BeforeToolCallEvent, ToolContext } from '../../src/hooks/before-tool-call.js';
 
 const { mockToolSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
   const toolSpan = {
@@ -39,7 +39,7 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-vi.mock('../otel.js', () => ({
+vi.mock('../../src/otel.js', () => ({
   getPromptLayerTracer: vi.fn(() => mockTracerInstance),
 }));
 
@@ -50,6 +50,7 @@ function seedSession(sessionKey: string) {
     agentCtx,
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 0,
@@ -110,7 +111,8 @@ describe('handleBeforeToolCall', () => {
 
     handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
 
-    expect(mockTracerInstance.startSpan.mock.calls.at(-1)?.[2]).toBe(agentCtx);
+    const calls = mockTracerInstance.startSpan.mock.calls as unknown as Array<[string, unknown, unknown]>;
+    expect(calls.at(-1)?.[2]).toBe(agentCtx);
   });
 
   it('uses OpenClaw toolCallId when provided', () => {
@@ -171,11 +173,10 @@ describe('handleBeforeToolCall', () => {
     expect(session.toolSequence).toBe(2);
   });
 
-  it('captures tool input when captureToolInput is enabled', () => {
+  it('records tool arguments as GenAI attributes', () => {
     seedSession('sess-1');
-    const config = createTestConfig({ captureToolInput: true });
 
-    handleBeforeToolCall(baseEvent, baseCtx, config);
+    handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
 
     const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1);
     expect(lastCall).toEqual([
@@ -187,19 +188,6 @@ describe('handleBeforeToolCall', () => {
       }),
       expect.anything(),
     ]);
-  });
-
-  it('does not capture tool input by default', () => {
-    seedSession('sess-1');
-
-    handleBeforeToolCall(baseEvent, baseCtx, createTestConfig());
-
-    const lastCall = mockTracerInstance.startSpan.mock.calls.at(-1) as
-      | [string, { attributes: Record<string, unknown> }, unknown]
-      | undefined;
-    expect(lastCall).toBeDefined();
-    const attrs = lastCall![1].attributes;
-    expect(attrs).not.toHaveProperty('gen_ai.tool.call.arguments');
   });
 
   it('returns early when sessionKey is missing', () => {
@@ -264,7 +252,8 @@ describe('handleBeforeToolCall', () => {
     );
 
     expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(2);
-    expect(mockTracerInstance.startSpan.mock.calls.map((call) => call[0])).toEqual([
+    const calls = mockTracerInstance.startSpan.mock.calls as unknown as Array<[string]>;
+    expect(calls.map((call) => call[0])).toEqual([
       'execute_tool Read',
       'execute_tool Write',
     ]);

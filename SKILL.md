@@ -86,9 +86,9 @@ Use this when the user wants the safest starting point:
 }
 ```
 
-### Rich Debugging
+### With Provider Mapping
 
-Use this when the user wants deep payload visibility and accepts privacy trade-offs:
+Use this when OpenClaw provider ids need to be mapped to OTEL GenAI provider names:
 
 ```jsonc
 {
@@ -103,13 +103,7 @@ Use this when the user wants deep payload visibility and accepts privacy trade-o
           "serviceName": "openclaw-agent",
           "providerNameMap": {
             "customprovider": "openai"
-          },
-          "captureMessageContent": true,
-          "captureHistoryMessages": true,
-          "historyMessagesMaxLength": 100000,
-          "toolInputMaxLength": 100000,
-          "toolOutputMaxLength": 16384,
-          "redactSecrets": true
+          }
         }
       }
     }
@@ -129,14 +123,6 @@ These keys currently affect runtime behavior:
 | `serviceName` | `openclaw-agent` | OTEL `service.name`. |
 | `providerName` | `""` | Falls back to `PROMPTLAYER_PROVIDER_NAME`. |
 | `providerNameMap` | `{}` | Useful for ids such as `customprovider -> openai`. |
-| `captureToolInput` | `true` | Captures tool arguments. |
-| `captureToolOutput` | `false` | Captures tool results. |
-| `toolInputMaxLength` | `2048` | Integer truncation limit for tool arguments. |
-| `toolOutputMaxLength` | `512` | Integer truncation limit for tool results and chat output capture. |
-| `captureMessageContent` | `false` | Captures chat content, system instructions, and tool definitions. Privacy-sensitive. |
-| `captureHistoryMessages` | `false` | Includes available conversation history in captured GenAI input messages. |
-| `historyMessagesMaxLength` | `16384` | Integer truncation limit for serialized message arrays. |
-| `redactSecrets` | `true` | Best-effort secret redaction. |
 | `resourceAttributes` | `{}` | Additional OTEL resource attributes. |
 | `spanProcessorType` | `batch` | Use `simple` for exporter debugging. |
 | `batchConfig.maxQueueSize` | `2048` | Batch exporter queue size. |
@@ -148,19 +134,14 @@ These keys currently affect runtime behavior:
 - The plugin exports traces, not metrics.
 - The plugin creates `invoke_agent`, `chat`, and `execute_tool` spans.
 - Chat spans are emitted from `llm_output`, not directly from `llm_input`.
+- Chat spans emit modern `gen_ai.input.messages` and `gen_ai.output.messages` JSON attributes when message data is available.
+- Thinking/reasoning content is preserved as `thinking` parts inside `gen_ai.output.messages`.
 - `agent_end` may wait briefly for pending `llm_output` processing before finalizing the root span.
-- `captureMessageContent: true` increases captured content significantly and can include sensitive data.
-- `redactSecrets: true` is best-effort and should stay enabled unless the user is debugging locally.
 
-## Privacy Defaults
+## Payload Notes
 
-Prefer these defaults unless the user explicitly asks for richer capture:
-
-- keep `captureMessageContent: false`
-- keep `captureHistoryMessages: false`
-- keep `captureToolOutput: false`
-- keep `redactSecrets: true`
-- keep the API key in the environment, not in committed config
+- The plugin does not redact or truncate message, tool argument, or tool result attributes.
+- Keep the API key in the environment, not in committed config.
 
 ## Troubleshooting Checklist
 
@@ -170,7 +151,7 @@ If traces do not appear:
 2. Check that the plugin key is exactly `openclaw-promptlayer`.
 3. Check that OpenClaw was restarted after config or environment changes.
 4. Check that OpenClaw is new enough to emit `llm_input`, `llm_output`, and `before_tool_call`.
-5. Check network access to `https://api.promptlayer.com/v1/traces`.
+5. Check network access to the configured endpoint.
 6. Check OpenClaw logs for `PromptLayer trace export failed`.
 
 If chat spans are missing or incomplete:
@@ -184,7 +165,6 @@ If chat spans are missing or incomplete:
 When helping a user:
 
 - prefer a minimal config first
-- explain privacy-sensitive options before enabling them
 - never echo or commit a real API key
 - redact any shared secrets when quoting `openclaw.json`
 - use `endpoint` only for the OTLP traces endpoint

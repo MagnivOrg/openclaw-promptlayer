@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: MIT
 /**
- * Shared utilities: safe JSON serialization, truncation, secret redaction.
+ * Shared utilities: safe JSON serialization and message normalization.
  */
-
-/** Patterns that likely indicate secret values. */
-const SECRET_PATTERNS = [
-  /(?:api[_-]?key|token|secret|password|auth|credential|bearer)\s*[:=]\s*["']?[^\s"',}{]{8,}/gi,
-  /(?:sk|pk|rk|pat|ghp|gho|glpat|xox[bpras])[_-][A-Za-z0-9_-]{10,}/g,
-  /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g, // JWT
-];
 
 /**
  * Serialize a value to JSON, handling circular refs and BigInts.
@@ -30,44 +23,9 @@ export function safeJsonStringify(value: unknown): string {
   }
 }
 
-/** Truncate a string to maxLength, appending "...[truncated]" if needed. */
-export function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  return value.slice(0, maxLength) + '...[truncated]';
-}
-
-/** Redact likely secrets from a string. */
-export function redactSecrets(value: string): string {
-  let result = value;
-  for (const pattern of SECRET_PATTERNS) {
-    // Reset lastIndex for global regexes
-    pattern.lastIndex = 0;
-    result = result.replace(pattern, (match) => {
-      // Keep the key name, redact the value portion
-      const eqIdx = match.search(/[:=]/);
-      if (eqIdx !== -1) {
-        return match.slice(0, eqIdx + 1) + ' [REDACTED]';
-      }
-      return '[REDACTED]';
-    });
-  }
-  return result;
-}
-
-/**
- * Prepare a tool input/output value for recording as a span attribute.
- * Serializes to JSON, optionally redacts secrets, and truncates.
- */
-export function prepareForCapture(
-  value: unknown,
-  maxLength: number,
-  redact: boolean,
-): string {
-  let str = typeof value === 'string' ? value : safeJsonStringify(value);
-  if (redact) {
-    str = redactSecrets(str);
-  }
-  return truncate(str, maxLength);
+/** Prepare a value for recording as a span attribute. */
+export function prepareForCapture(value: unknown): string {
+  return typeof value === 'string' ? value : safeJsonStringify(value);
 }
 
 /**
@@ -360,11 +318,16 @@ function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): v
       : b.content !== undefined && b.type === 'thinking'
         ? String(b.content)
         : undefined;
+  const reasoningVal = extractReasoningText(b);
 
   if ((b.type === 'text' || b.type === 'output_text') && textVal !== undefined) {
     appendTaggedOutputParts(parts, textVal);
   } else if (b.type === 'thinking' && thinkingVal !== undefined) {
     parts.push({ type: 'thinking', content: thinkingVal });
+  } else if (b.type === 'redacted_thinking') {
+    parts.push({ type: 'thinking', content: '[redacted thinking]' });
+  } else if (b.type === 'reasoning' && reasoningVal !== undefined) {
+    parts.push({ type: 'thinking', content: reasoningVal });
   } else if (
     (b.type === 'reasoning' || b.type === 'thinking' || b.thought === true) &&
     textVal !== undefined
@@ -394,6 +357,54 @@ function appendOutputPartFromBlock(parts: GenAiMessagePart[], block: unknown): v
   }
 }
 
+function extractTextFromUnknown(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+function extractReasoningText(block: Record<string, unknown>): string | undefined {
+  const direct =
+    extractTextFromUnknown(block.reasoning) ??
+    extractTextFromUnknown(block.reasoning_content) ??
+    extractTextFromUnknown(block.thinking) ??
+    extractTextFromUnknown(block.content) ??
+    extractTextFromUnknown(block.text);
+  if (direct !== undefined) return direct;
+
+  return extractReasoningSummary(block.summary);
+}
+
+function extractTopLevelReasoningText(message: Record<string, unknown>): string | undefined {
+  return (
+    extractTextFromUnknown(message.reasoning) ??
+    extractTextFromUnknown(message.reasoning_content) ??
+    extractTextFromUnknown(message.thinking) ??
+    extractReasoningSummary(message.summary)
+  );
+}
+
+function extractReasoningSummary(summary: unknown): string | undefined {
+  if (!Array.isArray(summary)) return undefined;
+
+  const parts = summary
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      if (!item || typeof item !== 'object') return '';
+      const record = item as Record<string, unknown>;
+      return (
+        extractTextFromUnknown(record.text) ??
+        extractTextFromUnknown(record.content) ??
+        extractTextFromUnknown(record.summary_text) ??
+        ''
+      );
+    })
+    .map((part) => part.trim())
+    .filter((part) => part !== '');
+
+  return parts.length > 0 ? parts.join('\n') : undefined;
+}
+
 export function normalizeToGenAiOutputMessages(
   assistantMessage: unknown,
   finishReason?: string,
@@ -405,6 +416,11 @@ export function normalizeToGenAiOutputMessages(
   const parts: GenAiMessagePart[] = [];
   const content = raw.content;
   const toolCalls = raw.tool_calls as Array<Record<string, unknown>> | undefined;
+  const reasoningContent = extractTopLevelReasoningText(raw);
+
+  if (reasoningContent !== undefined) {
+    parts.push({ type: 'thinking', content: reasoningContent });
+  }
 
   if (content === undefined || content === null) {
     // Tool-call-only assistant messages may not include content.

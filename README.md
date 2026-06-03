@@ -11,7 +11,7 @@ It captures the execution shape of an OpenClaw run:
 - one `chat <model>` span per LLM call, reconstructed from `llm_input` and `llm_output`
 - one `execute_tool <tool>` span per tool call
 - token usage on chat spans when OpenClaw exposes usage data
-- optional message, tool argument, and tool result capture with truncation and secret redaction
+- GenAI message, tool argument, and tool result attributes as OTEL span attributes
 
 ## Requirements
 
@@ -53,7 +53,7 @@ The plugin id must be `openclaw-promptlayer`.
 
 ## Quick Start
 
-Minimal configuration:
+Production configuration:
 
 ```json
 {
@@ -72,9 +72,9 @@ Restart OpenClaw after changing config. The plugin reads `PROMPTLAYER_API_KEY` a
 
 If no API key is available, the plugin disables itself and logs an error instead of starting half-configured.
 
-## Recommended Configuration
+## Configuration
 
-This example is useful when you want richer debugging and accept the privacy trade-offs of message capture:
+Use config only when you need to override the endpoint, environment labels, service name, or provider mapping:
 
 ```jsonc
 {
@@ -93,15 +93,7 @@ This example is useful when you want richer debugging and accept the privacy tra
             "customprovider": "openai"
           },
 
-          // Full payload capture for debugging.
-          "captureMessageContent": true,
-          "captureHistoryMessages": true,
-          "historyMessagesMaxLength": 100000,
-          "toolInputMaxLength": 100000,
-          "toolOutputMaxLength": 16384,
-
-          // Keep secret redaction on unless you are debugging locally.
-          "redactSecrets": true
+          "spanProcessorType": "batch"
         }
       }
     }
@@ -111,9 +103,7 @@ This example is useful when you want richer debugging and accept the privacy tra
 
 Notes:
 
-- `captureMessageContent: true` captures chat input/output and also allows tool inputs/results to be captured on related spans.
-- `captureHistoryMessages: true` includes available conversation history in captured chat inputs. This can become large.
-- `redactSecrets: true` is best-effort protection for common API keys, bearer tokens, JWTs, passwords, and similar secrets.
+- Message, tool argument, and tool result attributes are exported as normal OTEL span attributes.
 - `spanProcessorType: "simple"` is useful when debugging exporter behavior because spans are exported immediately.
 
 ## What The Plugin Captures
@@ -156,7 +146,7 @@ Chat spans include:
 - request/response model attributes
 - `openclaw.llm.run_id`
 - token usage attributes when provided by OpenClaw
-- optional `gen_ai.input.messages`, `gen_ai.output.messages`, indexed prompt/completion attributes, system instructions, and tool definitions when message capture is enabled
+- `gen_ai.input.messages`, `gen_ai.output.messages`, thinking/reasoning parts, system instructions, and tool definitions when available
 
 If `lastAssistant` is unavailable or incomplete, the plugin can fall back to `assistantTexts`. When an agent ends before the final `llm_output` has arrived, finalization waits briefly so the final chat span can still be emitted.
 
@@ -172,7 +162,7 @@ Tool spans include:
 - `gen_ai.tool.type = "function"`
 - OpenClaw tool sequence
 - duration and output size metadata
-- optional tool arguments and result payloads
+- tool arguments and result payloads when available
 
 Tool-level error details are not always available in OpenClaw's tool persistence hook. Agent-level failures are recorded on the root span.
 
@@ -198,14 +188,6 @@ All config lives under `plugins.entries.openclaw-promptlayer.config`.
 | `serviceName` | `string` | `openclaw-agent` | OTEL `service.name`. |
 | `providerName` | `string` | `""` | Default provider name when OpenClaw metadata does not provide one. |
 | `providerNameMap` | `Record<string, string>` | `{}` | Maps OpenClaw provider ids to OTEL provider names. |
-| `captureToolInput` | `boolean` | `true` | Captures tool arguments. |
-| `captureToolOutput` | `boolean` | `false` | Captures tool results. |
-| `toolInputMaxLength` | `integer` | `2048` | Truncation limit for tool input capture. |
-| `toolOutputMaxLength` | `integer` | `512` | Truncation limit for tool output and chat output capture. |
-| `captureMessageContent` | `boolean` | `false` | Captures chat input, chat output, system instructions, and tool definitions. Privacy-sensitive. |
-| `captureHistoryMessages` | `boolean` | `false` | Includes available conversation history in captured GenAI input messages. |
-| `historyMessagesMaxLength` | `integer` | `16384` | Truncation limit for serialized message arrays. |
-| `redactSecrets` | `boolean` | `true` | Redacts common API keys, bearer tokens, JWTs, passwords, and similar secrets before capture. |
 | `resourceAttributes` | `Record<string, string>` | `{}` | Additional OTEL resource attributes. |
 | `spanProcessorType` | `"batch" \| "simple"` | `batch` | Use `simple` when debugging exporter behavior. |
 | `batchConfig.maxQueueSize` | `integer` | `2048` | Batch span processor queue size. |
@@ -214,10 +196,8 @@ All config lives under `plugins.entries.openclaw-promptlayer.config`.
 
 ## Privacy And Safety Notes
 
-- `captureMessageContent: true` is the highest-impact privacy switch.
-- `captureHistoryMessages: true` can capture long multi-turn context.
-- `captureToolOutput: true` can capture large or sensitive tool results.
-- `redactSecrets: true` helps, but it is not a formal DLP guarantee.
+- Traces can contain messages, tool arguments, tool results, and system instructions.
+- The plugin does not redact or truncate captured payload attributes.
 - Prefer `PROMPTLAYER_API_KEY` in the runtime environment instead of committing API keys into `openclaw.json`.
 
 ## Troubleshooting
@@ -230,7 +210,7 @@ Check these first:
 2. The plugin entry key is exactly `openclaw-promptlayer`.
 3. OpenClaw is at least `2026.2.1`.
 4. OpenClaw was restarted after config or environment changes.
-5. Your machine can reach `https://api.promptlayer.com/v1/traces`.
+5. Your machine can reach the configured endpoint.
 6. OpenClaw logs do not show `PromptLayer trace export failed`.
 
 ### Chat spans are missing or incomplete
@@ -248,8 +228,6 @@ git clone https://github.com/MagnivOrg/openclaw-promptlayer
 cd openclaw-promptlayer
 npm install
 npm run build
-npm run typecheck
-npm test
 ```
 
 To load the local checkout in OpenClaw, symlink it into your extensions directory or add the repo path to `plugins.load.paths`.

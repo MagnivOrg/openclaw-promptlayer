@@ -8,7 +8,7 @@
 
 import { vi } from 'vitest';
 import type { Span, Context, SpanContext } from '@opentelemetry/api';
-import type { PromptLayerPluginConfig } from './config.js';
+import type { PromptLayerPluginConfig } from '../src/config.js';
 
 /** Create a mock OTEL Span with all methods as vi.fn(). */
 export function mockSpan(overrides?: Partial<SpanContext>): Span {
@@ -37,10 +37,7 @@ export function mockContext(): Context {
   return {} as Context;
 }
 
-/**
- * Create a minimal PromptLayerPluginConfig with sensible test defaults.
- * All capture flags are off by default to keep tests explicit.
- */
+/** Create a minimal PromptLayerPluginConfig with sensible test defaults. */
 export function createTestConfig(
   overrides?: Partial<PromptLayerPluginConfig>,
 ): PromptLayerPluginConfig {
@@ -51,14 +48,6 @@ export function createTestConfig(
     serviceName: 'openclaw-agent',
     providerName: '',
     providerNameMap: {},
-    captureToolInput: false,
-    captureToolOutput: false,
-    toolInputMaxLength: 2048,
-    toolOutputMaxLength: 512,
-    captureMessageContent: false,
-    captureHistoryMessages: false,
-    historyMessagesMaxLength: 16384,
-    redactSecrets: true,
     resourceAttributes: {},
     spanProcessorType: 'batch',
     batchConfig: {

@@ -34,46 +34,6 @@
         "default": {},
         "description": "Map OpenClaw provider ids to OTEL provider names."
       },
-      "captureToolInput": {
-        "type": "boolean",
-        "default": true,
-        "description": "Record tool call arguments as span attributes."
-      },
-      "captureToolOutput": {
-        "type": "boolean",
-        "default": false,
-        "description": "Record tool results as span attributes."
-      },
-      "toolInputMaxLength": {
-        "type": "integer",
-        "default": 2048,
-        "description": "Max character length for captured tool input."
-      },
-      "toolOutputMaxLength": {
-        "type": "integer",
-        "default": 512,
-        "description": "Max character length for captured tool output."
-      },
-      "captureMessageContent": {
-        "type": "boolean",
-        "default": false,
-        "description": "Record GenAI request and response messages on chat spans."
-      },
-      "captureHistoryMessages": {
-        "type": "boolean",
-        "default": false,
-        "description": "Include available conversation history in captured GenAI input messages."
-      },
-      "historyMessagesMaxLength": {
-        "type": "integer",
-        "default": 16384,
-        "description": "Max character length for serialized message arrays stored on spans."
-      },
-      "redactSecrets": {
-        "type": "boolean",
-        "default": true,
-        "description": "Strip API keys, tokens, JWTs, passwords, and similar secrets from captured data."
-      },
       "resourceAttributes": {
         "type": "object",
         "additionalProperties": { "type": "string" },

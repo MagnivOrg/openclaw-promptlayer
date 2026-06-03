@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanKind } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleBeforeAgentStart } from './before-agent-start.js';
-import type { BeforeAgentStartEvent, AgentContext } from './before-agent-start.js';
+import { handleBeforeAgentStart } from '../../src/hooks/before-agent-start.js';
+import type { BeforeAgentStartEvent, AgentContext } from '../../src/hooks/before-agent-start.js';
 
 // Hoisted so they're available when vi.mock factory runs
 const { mockAgentSpan, mockTracerInstance, mockSetSpan } = vi.hoisted(() => {
@@ -41,7 +41,7 @@ vi.mock('@opentelemetry/api', async () => {
   };
 });
 
-vi.mock('../otel.js', () => ({
+vi.mock('../../src/otel.js', () => ({
   getPromptLayerTracer: vi.fn(() => mockTracerInstance),
 }));
 
@@ -135,7 +135,7 @@ describe('handleBeforeAgentStart', () => {
     );
     expect(mockTracerInstance.startSpan).toHaveBeenCalledTimes(1);
     expect(
-      mockTracerInstance.startSpan.mock.calls.some(([name]) =>
+      (mockTracerInstance.startSpan.mock.calls as unknown as Array<[string]>).some(([name]) =>
         String(name).startsWith('agent_turn'),
       ),
     ).toBe(false);

@@ -169,7 +169,6 @@ function emitTranscriptChatSpans(
       responseId,
       rawAssistantUsage(raw),
       endTime,
-      config,
     );
     previousEndTime = endTime;
     emitted = true;
@@ -184,7 +183,6 @@ function emitTranscriptChatSpans(
 function emitLlmOutputFallbackChatSpan(
   sessionKey: string,
   session: NonNullable<ReturnType<typeof spanStore.get>>,
-  config: PromptLayerPluginConfig,
 ): void {
   const completed = (session.completedLlmCalls ?? []).at(-1);
   if (!completed?.outputMessages || completed.outputMessages.length === 0) return;
@@ -197,7 +195,6 @@ function emitLlmOutputFallbackChatSpan(
     completed.responseId,
     completed.usage,
     completed.endTime ?? Date.now(),
-    config,
   );
   session.latestAllMessages = [
     ...completed.inputMessages,
@@ -245,7 +242,7 @@ function finalizeAgentEndNow(
   );
 
   if (!emitTranscriptChatSpans(sessionKey, session, event, ctx, config)) {
-    emitLlmOutputFallbackChatSpan(sessionKey, session, config);
+    emitLlmOutputFallbackChatSpan(sessionKey, session);
   }
 
   // Error status

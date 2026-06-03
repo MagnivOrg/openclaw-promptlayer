@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { spanStore } from '../context/span-store.js';
+import { spanStore } from '../../src/context/span-store.js';
 import { mockSpan, mockContext, createTestConfig } from '../test-helpers.js';
-import { handleToolResultPersist } from './tool-result-persist.js';
-import type { ToolResultPersistEvent, ToolResultPersistContext } from './tool-result-persist.js';
+import { handleToolResultPersist } from '../../src/hooks/tool-result-persist.js';
+import type { ToolResultPersistEvent, ToolResultPersistContext } from '../../src/hooks/tool-result-persist.js';
 
 function seedSessionWithTool(sessionKey: string, toolName: string) {
   const toolSpan = mockSpan();
@@ -13,6 +13,7 @@ function seedSessionWithTool(sessionKey: string, toolName: string) {
     agentCtx: mockContext(),
     toolStack: [],
     llmSpans: new Map(),
+      completedLlmCalls: [],
     completedToolCalls: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     toolSequence: 1,
@@ -81,26 +82,15 @@ describe('handleToolResultPersist', () => {
     );
   });
 
-  it('captures tool output when captureToolOutput is enabled', () => {
+  it('records tool output as a GenAI attribute', () => {
     const toolSpan = seedSessionWithTool('sess-1', 'Read');
-    const config = createTestConfig({ captureToolOutput: true });
 
-    handleToolResultPersist(baseEvent, baseCtx, config);
+    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
 
     expect(toolSpan.setAttribute).toHaveBeenCalledWith(
       'gen_ai.tool.call.result',
       expect.any(String),
     );
-  });
-
-  it('does not capture tool output by default', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-
-    handleToolResultPersist(baseEvent, baseCtx, createTestConfig());
-
-    const calls = (toolSpan.setAttribute as ReturnType<typeof vi.fn>).mock.calls;
-    const hasResult = calls.some(([key]: [string]) => key === 'gen_ai.tool.call.result');
-    expect(hasResult).toBe(false);
   });
 
   it('handles object messages (serializes to JSON for size)', () => {
@@ -128,6 +118,7 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedLlmCalls: [],
       completedToolCalls: [],
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 2,
@@ -168,6 +159,7 @@ describe('handleToolResultPersist', () => {
       agentCtx: mockContext(),
       toolStack: [],
       llmSpans: new Map(),
+      completedLlmCalls: [],
       completedToolCalls: [],
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       toolSequence: 0,
@@ -195,21 +187,6 @@ describe('handleToolResultPersist', () => {
     // Should throw but span.end should still be called (in finally block)
     expect(() => handleToolResultPersist(baseEvent, baseCtx, createTestConfig())).toThrow();
     expect(toolSpan.end).toHaveBeenCalled();
-  });
-
-  it('captures tool output when message content capture is enabled', () => {
-    const toolSpan = seedSessionWithTool('sess-1', 'Read');
-
-    handleToolResultPersist(
-      baseEvent,
-      baseCtx,
-      createTestConfig({ captureMessageContent: true }),
-    );
-
-    expect(toolSpan.setAttribute).toHaveBeenCalledWith(
-      'gen_ai.tool.call.result',
-      expect.any(String),
-    );
   });
 
 });
